@@ -11,6 +11,13 @@ export type Settings = {
     proxyUrl: string;
     temperature: string;
     systemPrompt: string;
+    imageApiKey: string;
+    imageBaseUrl: string;
+    imageModel: string;
+    mediaApiKey: string;
+    mediaBaseUrl: string;
+    videoModel: string;
+    audioModel: string;
   };
   github: {
     token: string;
@@ -40,6 +47,13 @@ export const DEFAULT_SETTINGS: Settings = {
     temperature: "0.7",
     systemPrompt:
       "Ты профессиональный веб-разработчик платформы Муравей 2.0. Создаёшь современные сайты на чистом HTML/CSS/JS. ВАЖНО: отвечай ТОЛЬКО одним блоком HTML-кода (с инлайн CSS и JS внутри одного файла index.html). Никаких пояснений вне кода. Дизайн — минималистичный, в духе Linear/Vercel.",
+    imageApiKey: "",
+    imageBaseUrl: "https://api.replicate.com/v1",
+    imageModel: "black-forest-labs/flux-schnell",
+    mediaApiKey: "",
+    mediaBaseUrl: "https://api.replicate.com/v1",
+    videoModel: "luma/ray-flash-2",
+    audioModel: "suno/bark",
   },
   github: { token: "", repo: "", siteUrl: "", branch: "main", proxy: "" },
   payments: { terminalKey: "", password: "" },

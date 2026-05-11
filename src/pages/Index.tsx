@@ -7,11 +7,19 @@ import { commitToGitHub, pingGitHub } from "@/lib/github";
 import { toast } from "sonner";
 import { AntTyping } from "@/components/AntTyping";
 import { BackgroundAnt } from "@/components/BackgroundAnt";
+import { detectIntent, generateImage, generateVideo, generateAudio, fileToBase64 } from "@/lib/media";
 
 type Tab = "chat" | "core" | "projects";
 type CoreTab = "ai" | "github" | "payments" | "system";
 type Device = "desktop" | "mobile";
-type Msg = { role: "user" | "ai"; text: string };
+type Msg = {
+  role: "user" | "ai";
+  text: string;
+  image?: string;
+  video?: string;
+  audio?: string;
+  status?: "loading";
+};
 
 const TEMPLATES = [
   { id: 1, title: "Магазин продуктов", desc: "Онлайн-магазин с корзиной", emoji: "🛒", tag: "Электронная коммерция", color: "purple", prompt: "Сделай красивый магазин продуктов с карточками товаров, корзиной и итоговой суммой." },
@@ -124,6 +132,8 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
   const [previewHtml, setPreviewHtml] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [files, setFilesState] = useState<ProjectFiles>(() => loadFiles());
+  const [attached, setAttached] = useState<{ name: string; data: string } | null>(null);
+  const photoRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const idx = findIndexHtml(files);
@@ -149,14 +159,85 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     return () => window.removeEventListener("muravey:project-updated", fn);
   }, []);
 
+  async function onPickPhoto(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try {
+      const data = await fileToBase64(f);
+      setAttached({ name: f.name, data });
+      toast.success("Фото прикреплено. Опишите, что с ним сделать.");
+    } catch {
+      toast.error("Не удалось загрузить фото");
+    } finally {
+      if (photoRef.current) photoRef.current.value = "";
+    }
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || busy) return;
+    if ((!text && !attached) || busy) return;
 
-    setMessages((m) => [...m, { role: "user", text }]);
+    const userMsg: Msg = { role: "user", text: text || "(без текста)", image: attached?.data };
+    setMessages((m) => [...m, userMsg]);
     setInput("");
+    const currentAttached = attached;
+    setAttached(null);
     setBusy(true);
 
+    const intent = detectIntent(text, !!currentAttached);
+
+    // ── МЕДИА-ВЕТКА ─────────────────────────────────────────────
+    if (intent === "image" || intent === "image-edit") {
+      const statusText = currentAttached ? "📸 Обработка изображения..." : "📸 Генерирую изображение...";
+      setMessages((m) => [...m, { role: "ai", text: statusText, status: "loading" }]);
+      try {
+        const url = await generateImage(text || "красивое фото", currentAttached ? { image: currentAttached.data } : undefined);
+        setMessages((m) => {
+          const next = [...m];
+          next[next.length - 1] = { role: "ai", text: "Готово, изображение сгенерировано.", image: url };
+          return next;
+        });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        toast.error(msg);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `Ошибка: ${msg}` }; return n; });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    if (intent === "audio") {
+      setMessages((m) => [...m, { role: "ai", text: "🎵 Сочиняю музыку...", status: "loading" }]);
+      try {
+        const url = await generateAudio(text);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "Музыка готова — нажмите play.", audio: url }; return n; });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        toast.error(msg);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `Ошибка: ${msg}` }; return n; });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    if (intent === "video") {
+      setMessages((m) => [...m, { role: "ai", text: "🎬 Рендеринг видео...", status: "loading" }]);
+      try {
+        const url = await generateVideo(text);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "Видео готово.", video: url }; return n; });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        toast.error(msg);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `Ошибка: ${msg}` }; return n; });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // ── ВЕБ-ВЕТКА (HTML-сайт) ───────────────────────────────────
     const ctx = filesContextForAi(files);
     const history: ChatMessage[] = [];
     if (ctx) history.push({ role: "user", content: ctx });
@@ -212,11 +293,33 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
                     ? "bg-foreground text-background rounded-br-md"
                     : "bg-secondary text-foreground rounded-bl-md border border-border"
                 }`}>
-                  {m.text}
+                  {m.status === "loading" ? (
+                    <div className="flex items-center gap-2.5">
+                      <AntTyping size={42} />
+                      <span className="font-mono text-xs">{m.text}<span className="animate-cursor">|</span></span>
+                    </div>
+                  ) : (
+                    <>{m.text}</>
+                  )}
+                  {m.image && (
+                    <div className="mt-2 rounded-lg overflow-hidden border border-border">
+                      <img src={m.image} alt="media" className="w-full max-h-80 object-contain bg-black/40" />
+                    </div>
+                  )}
+                  {m.video && (
+                    <div className="mt-2 rounded-lg overflow-hidden border border-border">
+                      <video src={m.video} controls className="w-full max-h-80 bg-black" />
+                    </div>
+                  )}
+                  {m.audio && (
+                    <div className="mt-2">
+                      <audio src={m.audio} controls className="w-full" />
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
-            {busy && (
+            {busy && messages[messages.length - 1]?.status !== "loading" && (
               <div className="flex justify-start animate-fade-up">
                 <div className="bg-secondary text-muted-foreground border border-border rounded-2xl rounded-bl-md px-4 py-3 text-sm flex items-center gap-3">
                   <AntTyping size={48} />
@@ -232,31 +335,65 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
           </div>
 
           <div className="border-t border-border p-3">
+            {attached && (
+              <div className="mb-2 flex items-center gap-2 p-2 rounded-lg bg-secondary border border-purple-500/30 animate-fade-up">
+                <img src={attached.data} alt="вложение" className="w-12 h-12 rounded object-cover border border-border" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium truncate">{attached.name}</div>
+                  <div className="text-[10px] font-mono text-muted-foreground">фото для трансформации</div>
+                </div>
+                <button onClick={() => setAttached(null)} className="w-6 h-6 rounded hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition">
+                  <Icon name="X" size={12} />
+                </button>
+              </div>
+            )}
+            <input ref={photoRef} type="file" accept="image/*" className="hidden" onChange={onPickPhoto} />
             <div className="bg-secondary border border-border rounded-xl p-2.5 focus-within:border-purple-500/50 transition-all">
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder="Опишите ваш сайт... поддерживается разметка"
+                placeholder={attached ? "Что сделать с фото? Например: «на фоне гор»" : "Опишите сайт, изображение, видео или музыку..."}
                 rows={2}
                 className="w-full bg-transparent text-sm placeholder:text-muted-foreground resize-none focus:outline-none"
                 disabled={busy}
               />
               <div className="flex items-center justify-between mt-1.5">
                 <div className="flex gap-1">
-                  <button className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition" title="Прикрепить">
-                    <Icon name="Paperclip" size={14} />
+                  <button
+                    onClick={() => photoRef.current?.click()}
+                    className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
+                      attached ? "bg-purple-500/20 text-purple-400" : "hover:bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                    title="Фото"
+                  >
+                    <Icon name="Camera" size={14} />
                   </button>
-                  <button className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition" title="Голос">
-                    <Icon name="Mic" size={14} />
-                  </button>
-                  <button className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition" title="Картинка">
+                  <button
+                    onClick={() => setInput((v) => (v ? v + " " : "") + "сгенерируй изображение ")}
+                    className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition"
+                    title="Картинка"
+                  >
                     <Icon name="Image" size={14} />
+                  </button>
+                  <button
+                    onClick={() => setInput((v) => (v ? v + " " : "") + "создай музыку ")}
+                    className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition"
+                    title="Музыка"
+                  >
+                    <Icon name="Music" size={14} />
+                  </button>
+                  <button
+                    onClick={() => setInput((v) => (v ? v + " " : "") + "сгенерируй видео ")}
+                    className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition"
+                    title="Видео"
+                  >
+                    <Icon name="Film" size={14} />
                   </button>
                 </div>
                 <button
                   onClick={send}
-                  disabled={busy || !input.trim()}
+                  disabled={busy || (!input.trim() && !attached)}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-xs font-bold hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Icon name="Send" size={12} />
@@ -484,6 +621,37 @@ function AIPanel() {
           </Field>
           <Field label="Температура">
             <Input value={s.ai.temperature} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, temperature: v } }))} placeholder="0.7" mono />
+          </Field>
+        </div>
+      </Card>
+
+      <Card title="Image API · Генерация фото" accent="purple" badge="Flux / SD / DALL·E">
+        <div className="grid md:grid-cols-2 gap-4">
+          <Field label="Image API Key">
+            <Input value={s.ai.imageApiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageApiKey: v } }))} placeholder="r8_..." type="password" mono />
+          </Field>
+          <Field label="Базовый URL" hint="Replicate / OpenAI / свой шлюз">
+            <Input value={s.ai.imageBaseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageBaseUrl: v } }))} placeholder="https://api.replicate.com/v1" mono />
+          </Field>
+          <Field label="Модель">
+            <Input value={s.ai.imageModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageModel: v } }))} placeholder="black-forest-labs/flux-schnell" mono />
+          </Field>
+        </div>
+      </Card>
+
+      <Card title="Video / Audio API · Музыка и видео" accent="orange" badge="Suno / Luma / Runway">
+        <div className="grid md:grid-cols-2 gap-4">
+          <Field label="Video/Audio API Key">
+            <Input value={s.ai.mediaApiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, mediaApiKey: v } }))} placeholder="r8_..." type="password" mono />
+          </Field>
+          <Field label="Базовый URL">
+            <Input value={s.ai.mediaBaseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, mediaBaseUrl: v } }))} placeholder="https://api.replicate.com/v1" mono />
+          </Field>
+          <Field label="Модель видео">
+            <Input value={s.ai.videoModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, videoModel: v } }))} placeholder="luma/ray-flash-2" mono />
+          </Field>
+          <Field label="Модель аудио">
+            <Input value={s.ai.audioModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, audioModel: v } }))} placeholder="suno/bark" mono />
           </Field>
         </div>
       </Card>
