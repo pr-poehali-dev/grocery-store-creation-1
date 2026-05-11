@@ -10,13 +10,19 @@ import { BackgroundAnt } from "@/components/BackgroundAnt";
 import { detectIntent, generateImage, generateVideo, generateAudio, fileToBase64 } from "@/lib/media";
 import { pingSupabase, applySql } from "@/lib/supabase";
 import { AuthGate } from "@/components/AuthGate";
+import { SupportWidget } from "@/components/SupportWidget";
 import {
   useAuth, signOut, addModerator, removeModerator, transferOwnership,
   setTokensFor, banUser, deleteUser, checkContent, logAudit, clearAudit, consumeToken, syncTopBalance,
 } from "@/lib/auth";
+import { useSupport, addMessage, resolveThread, markReadForAdmin } from "@/lib/support";
+import {
+  useIntegrations, addIntegration, updateIntegration, removeIntegration,
+  pingIntegration, buildLeadInjector, getIntegrationsSnapshot, KIND_LABEL, KIND_HINT, type IntegrationKind,
+} from "@/lib/integrations";
 
 type Tab = "chat" | "core" | "projects";
-type CoreTab = "ai" | "github" | "payments" | "system" | "logs" | "users";
+type CoreTab = "ai" | "github" | "payments" | "system" | "logs" | "users" | "dialogs" | "integrations";
 type Device = "desktop" | "mobile";
 type Msg = {
   role: "user" | "ai";
@@ -91,6 +97,7 @@ function IndexInner() {
           )}
         </main>
         <BottomNav tab={tab} setTab={setTab} />
+        <SupportWidget />
       </div>
     </div>
   );
@@ -166,9 +173,10 @@ function TopBar() {
 // ─── Bottom Nav ───────────────────────────────────────────────────────────────
 function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   const { isModerator } = useAuth();
-  const items: { id: Tab; label: string; icon: string }[] = [
+  const { pendingCount, totalUnread } = useSupport();
+  const items: { id: Tab; label: string; icon: string; dot?: number }[] = [
     { id: "chat", label: "Чат", icon: "MessageSquare" },
-    ...(isModerator ? [{ id: "core" as Tab, label: "Мозг", icon: "Brain" }] : []),
+    ...(isModerator ? [{ id: "core" as Tab, label: "Мозг", icon: "Brain", dot: pendingCount + totalUnread }] : []),
     { id: "projects", label: "Проекты", icon: "LayoutGrid" },
   ];
 
@@ -187,6 +195,11 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             >
               <Icon name={item.icon} fallback="Circle" size={15} />
               <span className="font-heading uppercase tracking-wider text-xs">{item.label}</span>
+              {item.dot ? (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-[16px] px-1 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+                  {item.dot}
+                </span>
+              ) : null}
             </button>
           );
         })}
@@ -358,7 +371,13 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
       const html = extractHtml(rest || reply);
       if (html) {
         const sb = getSettings().supabase;
-        const finalHtml = sb.url && sb.anonKey ? injectSupabase(html, sb.url, sb.anonKey) : html;
+        let finalHtml = sb.url && sb.anonKey ? injectSupabase(html, sb.url, sb.anonKey) : html;
+        const leadScript = buildLeadInjector(getIntegrationsSnapshot());
+        if (leadScript) {
+          finalHtml = finalHtml.includes("</body>")
+            ? finalHtml.replace("</body>", `${leadScript}\n</body>`)
+            : finalHtml + leadScript;
+        }
         setPreviewHtml(finalHtml);
         const nextFiles = { ...files, "index.html": finalHtml };
         setFilesState(nextFiles);
@@ -638,13 +657,16 @@ function CoreTab() {
   const { isOwner } = useAuth();
   const [sub, setSub] = useState<CoreTab>(isOwner ? "ai" : "logs");
 
-  const subTabs: { id: CoreTab; label: string; icon: string; owner?: boolean }[] = [
+  const { pendingCount, totalUnread } = useSupport();
+  const subTabs: { id: CoreTab; label: string; icon: string; owner?: boolean; badge?: number }[] = [
     { id: "ai", label: "Движок", icon: "Brain", owner: true },
     { id: "github", label: "GitHub", icon: "Github" },
     { id: "payments", label: "Платежи", icon: "CreditCard", owner: true },
     { id: "system", label: "Система", icon: "Settings", owner: true },
     { id: "logs", label: "Логи", icon: "ScrollText" },
     { id: "users", label: "Пользователи", icon: "Users", owner: true },
+    { id: "dialogs", label: "Диалоги", icon: "MessagesSquare", badge: totalUnread || pendingCount },
+    { id: "integrations", label: "Интеграции", icon: "Plug", owner: true },
   ].filter((t) => !t.owner || isOwner);
 
   return (
@@ -666,6 +688,9 @@ function CoreTab() {
           >
             <Icon name={t.icon} fallback="Circle" size={14} />
             <span className="font-heading uppercase tracking-wider text-xs">{t.label}</span>
+            {t.badge ? (
+              <span className="min-w-[16px] h-[16px] px-1 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{t.badge}</span>
+            ) : null}
           </button>
         ))}
       </div>
@@ -676,6 +701,8 @@ function CoreTab() {
       {sub === "system" && isOwner && <SystemPanel />}
       {sub === "logs" && <LogsPanel />}
       {sub === "users" && isOwner && <UsersPanel />}
+      {sub === "dialogs" && <DialogsPanel />}
+      {sub === "integrations" && isOwner && <IntegrationsPanel />}
     </div>
   );
 }
@@ -1342,6 +1369,224 @@ function UsersPanel() {
             </div>
           ))}
         </div>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Dialogs Panel ───────────────────────────────────────────────────────────
+function DialogsPanel() {
+  const { threads } = useSupport();
+  const [activeEmail, setActiveEmail] = useState<string | null>(threads[0]?.email || null);
+  const [reply, setReply] = useState("");
+  const active = threads.find((t) => t.email === activeEmail) || threads[0] || null;
+
+  useEffect(() => {
+    if (active) markReadForAdmin(active.email);
+  }, [active?.email, active?.messages.length]);
+
+  function sendReply() {
+    if (!active || !reply.trim()) return;
+    addMessage(active.email, "admin", reply.trim());
+    setReply("");
+    toast.success("Ответ отправлен");
+  }
+
+  return (
+    <Card title="Диалоги поддержки" accent="orange" badge={`${threads.length}`}>
+      <div className="grid md:grid-cols-[260px_1fr] gap-4 min-h-[60vh]">
+        <div className="space-y-1.5 max-h-[65vh] overflow-y-auto scrollbar-thin">
+          {threads.length === 0 && <div className="text-xs text-muted-foreground italic p-2">Диалогов пока нет</div>}
+          {threads.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setActiveEmail(t.email)}
+              className={`w-full text-left p-2.5 rounded-lg border transition ${
+                activeEmail === t.email
+                  ? "bg-secondary border-purple-500/50"
+                  : "bg-card border-border hover:bg-secondary"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-mono text-xs truncate flex-1">{t.email}</span>
+                {t.unreadForAdmin > 0 && (
+                  <span className="min-w-[16px] h-[16px] px-1 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{t.unreadForAdmin}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                {t.escalated && !t.resolved && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 uppercase">Эскалация</span>}
+                {t.resolved && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 uppercase">Решён</span>}
+                <span className="text-[10px] font-mono text-muted-foreground">{new Date(t.updatedAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+
+        <div className="bg-secondary border border-border rounded-xl flex flex-col">
+          {!active ? (
+            <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground italic">Выберите диалог</div>
+          ) : (
+            <>
+              <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                <div>
+                  <div className="font-mono text-sm">{active.email}</div>
+                  <div className="text-[10px] text-muted-foreground font-mono">{active.messages.length} сообщений</div>
+                </div>
+                {!active.resolved && (
+                  <button
+                    onClick={() => { resolveThread(active.email); toast.success("Диалог закрыт"); }}
+                    className="px-3 py-1.5 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-xs hover:bg-green-500/20 transition"
+                  >
+                    Закрыть тикет
+                  </button>
+                )}
+              </div>
+
+              <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-3 max-h-[50vh]">
+                {active.messages.map((m) => (
+                  <div key={m.id} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
+                    <div className={`max-w-[80%] px-3 py-2 rounded-2xl text-xs leading-relaxed whitespace-pre-wrap ${
+                      m.role === "user"
+                        ? "bg-card text-foreground border border-border rounded-bl-sm"
+                        : m.role === "admin"
+                          ? "bg-orange-500/15 text-foreground border border-orange-500/30 rounded-br-sm"
+                          : "bg-purple-500/10 text-foreground border border-purple-500/20 rounded-br-sm"
+                    }`}>
+                      <div className="text-[9px] font-mono uppercase tracking-wider mb-0.5 opacity-60">
+                        {m.role === "user" ? "Пользователь" : m.role === "admin" ? "Оператор" : "ИИ"} · {new Date(m.ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+                      </div>
+                      {m.text}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="p-2.5 border-t border-border">
+                <div className="flex gap-2">
+                  <input
+                    value={reply}
+                    onChange={(e) => setReply(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") sendReply(); }}
+                    placeholder="Вклиниться в диалог..."
+                    className="flex-1 bg-card border border-border rounded-lg px-3 py-2 text-xs focus:border-orange-500/50 focus:outline-none"
+                  />
+                  <button
+                    onClick={sendReply}
+                    disabled={!reply.trim()}
+                    className="px-3 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black hover:opacity-90 transition disabled:opacity-50"
+                  >
+                    <Icon name="Send" size={12} />
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ─── Integrations Panel ──────────────────────────────────────────────────────
+function IntegrationsPanel() {
+  const items = useIntegrations();
+  const [kind, setKind] = useState<IntegrationKind>("webhook");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+
+  function add() {
+    if (!url.trim() || !url.startsWith("http")) return toast.error("Введите корректный URL");
+    addIntegration({ kind, name: name.trim() || KIND_LABEL[kind], url: url.trim(), apiKey: apiKey.trim() || undefined, enabled: true });
+    setName(""); setUrl(""); setApiKey("");
+    toast.success("Интеграция добавлена");
+  }
+
+  async function ping(id: string) {
+    const i = items.find((x) => x.id === id);
+    if (!i) return;
+    try {
+      toast.loading("Отправляем тестовый лид...", { id: "ping" });
+      await pingIntegration(i);
+      toast.success("Лид доставлен", { id: "ping" });
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Ошибка", { id: "ping" });
+    }
+  }
+
+  return (
+    <div className="space-y-4 animate-fade-up">
+      <Card title="Подключение CRM и Webhooks" accent="purple" badge="Лиды → CRM">
+        <p className="text-xs text-muted-foreground mb-4">
+          Формы на сгенерированном сайте автоматически отправляют данные во все активные интеграции. Поддерживаются Битрикс24, AmoCRM, 1С, Albato, Zapier и любой Webhook.
+        </p>
+
+        <div className="grid md:grid-cols-2 gap-3 mb-4">
+          <Field label="Тип системы">
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value as IntegrationKind)}
+              className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:border-purple-500/50 focus:outline-none"
+            >
+              {(Object.keys(KIND_LABEL) as IntegrationKind[]).map((k) => (
+                <option key={k} value={k}>{KIND_LABEL[k]}</option>
+              ))}
+            </select>
+            <div className="text-[10px] text-muted-foreground mt-1 font-mono">{KIND_HINT[kind]}</div>
+          </Field>
+          <Field label="Название">
+            <Input value={name} onChange={setName} placeholder={KIND_LABEL[kind]} />
+          </Field>
+          <Field label="Webhook URL / API endpoint">
+            <Input value={url} onChange={setUrl} placeholder="https://hook.com/abc123" mono />
+          </Field>
+          <Field label="API-ключ (опц.)">
+            <Input value={apiKey} onChange={setApiKey} placeholder="опционально" type="password" mono />
+          </Field>
+        </div>
+        <div className="flex justify-end">
+          <button onClick={add} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">
+            <Icon name="Plus" size={14} />
+            Добавить
+          </button>
+        </div>
+      </Card>
+
+      <Card title="Активные интеграции" accent="orange" badge={`${items.filter((i) => i.enabled).length}/${items.length}`}>
+        {items.length === 0 ? (
+          <div className="text-xs text-muted-foreground italic p-3">Пока нет подключений</div>
+        ) : (
+          <div className="space-y-2">
+            {items.map((i) => (
+              <div key={i.id} className="p-3 rounded-lg bg-secondary border border-border">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className={`w-2 h-2 rounded-full ${i.enabled ? "bg-green-500 animate-pulse-dot" : "bg-muted-foreground"}`} />
+                  <span className="font-heading text-xs uppercase tracking-wider">{KIND_LABEL[i.kind]}</span>
+                  <span className="font-medium text-sm truncate flex-1">{i.name}</span>
+                  <button
+                    onClick={() => updateIntegration(i.id, { enabled: !i.enabled })}
+                    className="text-[10px] font-mono uppercase px-2 py-1 rounded border border-border hover:bg-card transition"
+                  >
+                    {i.enabled ? "Выключить" : "Включить"}
+                  </button>
+                  <button
+                    onClick={() => ping(i.id)}
+                    className="text-[10px] font-mono uppercase px-2 py-1 rounded bg-purple-500/10 border border-purple-500/30 text-purple-400 hover:bg-purple-500/20 transition"
+                  >
+                    Тест
+                  </button>
+                  <button
+                    onClick={() => removeIntegration(i.id)}
+                    className="w-6 h-6 rounded hover:bg-card flex items-center justify-center text-muted-foreground hover:text-red-400 transition"
+                  >
+                    <Icon name="X" size={12} />
+                  </button>
+                </div>
+                <div className="text-[10px] font-mono text-muted-foreground truncate mt-1.5">→ {i.url}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
     </div>
   );
