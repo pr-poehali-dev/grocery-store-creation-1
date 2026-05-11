@@ -18,7 +18,7 @@ export async function chat(
   const { provider, apiKey, baseUrl, model, temperature, proxyUrl, systemPrompt } = s.ai;
 
   if (!apiKey) {
-    throw new Error("Не задан API-ключ. Откройте вкладку «Ядро → ИИ-движок» и введите ключ.");
+    throw new Error("Не задан API-ключ. Откройте вкладку «Мозг → Движок» и введите ключ.");
   }
 
   const messages: ChatMessage[] = [

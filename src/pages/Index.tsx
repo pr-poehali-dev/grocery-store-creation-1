@@ -5,6 +5,8 @@ import { chat, extractHtml, type ChatMessage } from "@/lib/ai";
 import { importZip, exportZip, findIndexHtml, loadFiles, saveFiles, filesContextForAi, type ProjectFiles } from "@/lib/files";
 import { commitToGitHub } from "@/lib/github";
 import { toast } from "sonner";
+import { AntTyping } from "@/components/AntTyping";
+import { BackgroundAnt } from "@/components/BackgroundAnt";
 
 type Tab = "chat" | "core" | "projects";
 type CoreTab = "ai" | "github" | "payments" | "system";
@@ -25,16 +27,19 @@ export default function Index() {
   const [presetPrompt, setPresetPrompt] = useState("");
 
   return (
-    <div className="min-h-screen bg-background text-foreground grid-bg">
-      <TopBar />
-      <main className="pb-24">
-        {tab === "chat" && <ChatTab presetPrompt={presetPrompt} clearPreset={() => setPresetPrompt("")} />}
-        {tab === "core" && <CoreTab />}
-        {tab === "projects" && (
-          <ProjectsTab onUse={(p) => { setPresetPrompt(p); setTab("chat"); }} />
-        )}
-      </main>
-      <BottomNav tab={tab} setTab={setTab} />
+    <div className="min-h-screen bg-background text-foreground grid-bg relative">
+      <BackgroundAnt />
+      <div className="relative z-10">
+        <TopBar />
+        <main className="pb-24">
+          {tab === "chat" && <ChatTab presetPrompt={presetPrompt} clearPreset={() => setPresetPrompt("")} />}
+          {tab === "core" && <CoreTab />}
+          {tab === "projects" && (
+            <ProjectsTab onUse={(p) => { setPresetPrompt(p); setTab("chat"); }} />
+          )}
+        </main>
+        <BottomNav tab={tab} setTab={setTab} />
+      </div>
     </div>
   );
 }
@@ -82,7 +87,7 @@ function TopBar() {
 function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   const items: { id: Tab; label: string; icon: string }[] = [
     { id: "chat", label: "Чат", icon: "MessageSquare" },
-    { id: "core", label: "Ядро", icon: "Cpu" },
+    { id: "core", label: "Мозг", icon: "Brain" },
     { id: "projects", label: "Проекты", icon: "LayoutGrid" },
   ];
 
@@ -112,7 +117,7 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 // ─── Chat Tab ─────────────────────────────────────────────────────────────────
 function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPreset: () => void }) {
   const [messages, setMessages] = useState<Msg[]>([
-    { role: "ai", text: "Привет! Я Муравей 2.0. Опиши сайт — я сразу сгенерирую HTML и покажу его в превью. Перед запуском проверь ключ во вкладке «Ядро → ИИ-движок»." },
+    { role: "ai", text: "Привет! Я Муравей 2.0. Опиши сайт — я сразу сгенерирую HTML и покажу его в превью. Перед запуском проверь ключ во вкладке «Мозг → Движок»." },
   ]);
   const [input, setInput] = useState("");
   const [device, setDevice] = useState<Device>("desktop");
@@ -188,7 +193,7 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
           <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Icon name="Sparkles" size={14} className="text-purple-500" />
-              <h2 className="font-heading uppercase tracking-wider text-sm">Рабочее пространство ИИ</h2>
+              <h2 className="font-heading uppercase tracking-wider text-sm">Рабочее пространство</h2>
             </div>
             <button
               onClick={() => setMessages([{ role: "ai", text: "Чат очищен. Опиши новый сайт." }])}
@@ -213,9 +218,14 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
             ))}
             {busy && (
               <div className="flex justify-start animate-fade-up">
-                <div className="bg-secondary text-muted-foreground border border-border rounded-2xl rounded-bl-md px-4 py-2.5 text-sm flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse-dot" />
-                  ИИ думает...
+                <div className="bg-secondary text-muted-foreground border border-border rounded-2xl rounded-bl-md px-4 py-3 text-sm flex items-center gap-3">
+                  <AntTyping size={48} />
+                  <div className="flex flex-col">
+                    <span className="font-heading text-xs uppercase tracking-wider text-foreground">Муравей печатает</span>
+                    <span className="text-[11px] font-mono text-muted-foreground">
+                      компилирует код<span className="animate-cursor">_</span>
+                    </span>
+                  </div>
                 </div>
               </div>
             )}
@@ -250,7 +260,7 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-xs font-bold hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Icon name="Send" size={12} />
-                  Создать сайт
+                  За работу
                 </button>
               </div>
             </div>
@@ -298,17 +308,41 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
               device === "mobile" ? "w-[380px] max-w-full" : "w-full"
             } overflow-hidden relative`}>
               {previewHtml ? (
-                <iframe
-                  title="превью"
-                  srcDoc={previewHtml}
-                  sandbox="allow-scripts allow-forms"
-                  className="w-full h-full border-0 bg-white"
-                />
+                <>
+                  <iframe
+                    title="превью"
+                    srcDoc={previewHtml}
+                    sandbox="allow-scripts allow-forms"
+                    className="w-full h-full border-0 bg-white"
+                  />
+                  {busy && (
+                    <div className="absolute inset-0 bg-background/85 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-up">
+                      <AntTyping size={140} />
+                      <div className="mt-6 text-center">
+                        <h3 className="font-heading text-2xl text-gradient mb-1">Муравей за работой</h3>
+                        <p className="text-sm font-mono text-muted-foreground">
+                          печатает код<span className="animate-cursor">|</span>
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : busy ? (
+                <div className="w-full h-full flex flex-col items-center justify-center text-center p-8 relative">
+                  <div className="absolute inset-0 grid-bg opacity-40" />
+                  <div className="relative z-10">
+                    <AntTyping size={160} />
+                    <h3 className="font-heading text-3xl text-gradient mt-6 mb-1">Муравей за работой</h3>
+                    <p className="text-sm font-mono text-muted-foreground">
+                      печатает ваш сайт<span className="animate-cursor">|</span>
+                    </p>
+                  </div>
+                </div>
               ) : (
                 <div className="w-full h-full flex flex-col items-center justify-center text-center p-8 relative">
                   <div className="absolute inset-0 grid-bg opacity-40" />
                   <div className="relative z-10 max-w-md">
-                    <div className="text-5xl mb-4">🐜</div>
+                    <div className="mb-4 flex justify-center"><AntTyping size={110} /></div>
                     <h3 className="font-heading text-3xl mb-2 text-gradient">Готов к работе</h3>
                     <p className="text-sm text-muted-foreground mb-6">
                       Напишите запрос в чат слева. Ваш сайт появится здесь в реальном времени.
@@ -340,7 +374,7 @@ function CoreTab() {
   const [sub, setSub] = useState<CoreTab>("ai");
 
   const subTabs: { id: CoreTab; label: string; icon: string }[] = [
-    { id: "ai", label: "ИИ-движок", icon: "Brain" },
+    { id: "ai", label: "Движок", icon: "Brain" },
     { id: "github", label: "GitHub", icon: "Github" },
     { id: "payments", label: "Платежи", icon: "CreditCard" },
     { id: "system", label: "Система", icon: "Settings" },
@@ -349,8 +383,8 @@ function CoreTab() {
   return (
     <div className="max-w-5xl mx-auto px-4 md:px-6 pt-6 animate-fade-up">
       <div className="mb-6">
-        <div className="font-mono text-xs text-muted-foreground mb-1">/ админ / ядро</div>
-        <h1 className="font-heading text-4xl">Панель ядра</h1>
+        <div className="font-mono text-xs text-muted-foreground mb-1">/ админ / мозг</div>
+        <h1 className="font-heading text-4xl">Панель мозга</h1>
         <p className="text-muted-foreground text-sm mt-1">Настройки движка, интеграций и системы</p>
       </div>
 
