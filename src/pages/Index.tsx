@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import Icon from "@/components/ui/icon";
-import { useSettings, type Settings } from "@/lib/store";
+import { useSettings, getSettings, type Settings } from "@/lib/store";
 import { chat, extractHtml, type ChatMessage } from "@/lib/ai";
 import { importZip, exportZip, findIndexHtml, loadFiles, saveFiles, filesContextForAi, type ProjectFiles } from "@/lib/files";
 import { commitToGitHub, pingGitHub } from "@/lib/github";
@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { AntTyping } from "@/components/AntTyping";
 import { BackgroundAnt } from "@/components/BackgroundAnt";
 import { detectIntent, generateImage, generateVideo, generateAudio, fileToBase64 } from "@/lib/media";
+import { pingSupabase, applySql } from "@/lib/supabase";
 
 type Tab = "chat" | "core" | "projects";
 type CoreTab = "ai" | "github" | "payments" | "system";
@@ -19,7 +20,29 @@ type Msg = {
   video?: string;
   audio?: string;
   status?: "loading";
+  actions?: string[];
+  progress?: number;
+  sql?: string;
 };
+
+function extractActions(text: string): { actions: string[]; rest: string } {
+  const firstLine = text.split("\n").find((l) => l.trim().length > 0) || "";
+  if (firstLine.includes("·") && firstLine.length < 240) {
+    const actions = firstLine.split("·").map((s) => s.trim()).filter(Boolean);
+    if (actions.length >= 2 && actions.length <= 8) {
+      return { actions, rest: text.replace(firstLine, "").trim() };
+    }
+  }
+  return { actions: [], rest: text };
+}
+
+function injectSupabase(html: string, url: string, anonKey: string): string {
+  if (!html.toLowerCase().includes("supabase")) return html;
+  const inject = `<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>window.__SUPABASE_URL__=${JSON.stringify(url)};window.__SUPABASE_ANON_KEY__=${JSON.stringify(anonKey)};window.supabaseClient=window.supabase&&window.supabase.createClient(window.__SUPABASE_URL__,window.__SUPABASE_ANON_KEY__);</script>`;
+  if (html.includes("</head>")) return html.replace("</head>", `${inject}\n</head>`);
+  return inject + html;
+}
 
 const TEMPLATES = [
   { id: 1, title: "Магазин продуктов", desc: "Онлайн-магазин с корзиной", emoji: "🛒", tag: "Электронная коммерция", color: "purple", prompt: "Сделай красивый магазин продуктов с карточками товаров, корзиной и итоговой суммой." },
@@ -125,7 +148,7 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 // ─── Chat Tab ─────────────────────────────────────────────────────────────────
 function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPreset: () => void }) {
   const [messages, setMessages] = useState<Msg[]>([
-    { role: "ai", text: "Привет! Я Муравей 2.0. Опиши сайт — я сразу сгенерирую HTML и покажу его в превью. Перед запуском проверь ключ во вкладке «Мозг → Движок»." },
+    { role: "ai", text: "[Система] Готов. Опишите задачу — сайт, БД, медиа.", actions: ["⚡ Готов к работе", "🧠 Контекст пуст", "🔌 Жду команды"] },
   ]);
   const [input, setInput] = useState("");
   const [device, setDevice] = useState<Device>("desktop");
@@ -188,19 +211,20 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
 
     // ── МЕДИА-ВЕТКА ─────────────────────────────────────────────
     if (intent === "image" || intent === "image-edit") {
-      const statusText = currentAttached ? "📸 Обработка изображения..." : "📸 Генерирую изображение...";
-      setMessages((m) => [...m, { role: "ai", text: statusText, status: "loading" }]);
+      const statusText = currentAttached ? "[Система] Обработка графических ресурсов..." : "[Система] Синтез изображения...";
+      setMessages((m) => [...m, { role: "ai", text: statusText, status: "loading", progress: 10 }]);
+      const tick = setInterval(() => {
+        setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(92, (last.progress || 10) + 7); return [...n]; });
+      }, 600);
       try {
         const url = await generateImage(text || "красивое фото", currentAttached ? { image: currentAttached.data } : undefined);
-        setMessages((m) => {
-          const next = [...m];
-          next[next.length - 1] = { role: "ai", text: "Готово, изображение сгенерировано.", image: url };
-          return next;
-        });
+        clearInterval(tick);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Изображение готово.", image: url, actions: ["📸 Графика синтезирована", "💾 Сохранено в ленту"] }; return n; });
       } catch (e: unknown) {
+        clearInterval(tick);
         const msg = e instanceof Error ? e.message : "Ошибка";
         toast.error(msg);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `Ошибка: ${msg}` }; return n; });
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
       } finally {
         setBusy(false);
       }
@@ -208,14 +232,19 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     }
 
     if (intent === "audio") {
-      setMessages((m) => [...m, { role: "ai", text: "🎵 Сочиняю музыку...", status: "loading" }]);
+      setMessages((m) => [...m, { role: "ai", text: "[Система] Синтез аудио-дорожки...", status: "loading", progress: 8 }]);
+      const tick = setInterval(() => {
+        setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(90, (last.progress || 8) + 5); return [...n]; });
+      }, 800);
       try {
         const url = await generateAudio(text);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "Музыка готова — нажмите play.", audio: url }; return n; });
+        clearInterval(tick);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Аудио готово.", audio: url, actions: ["🎵 Дорожка собрана", "▶ Готово к воспроизведению"] }; return n; });
       } catch (e: unknown) {
+        clearInterval(tick);
         const msg = e instanceof Error ? e.message : "Ошибка";
         toast.error(msg);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `Ошибка: ${msg}` }; return n; });
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
       } finally {
         setBusy(false);
       }
@@ -223,21 +252,31 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     }
 
     if (intent === "video") {
-      setMessages((m) => [...m, { role: "ai", text: "🎬 Рендеринг видео...", status: "loading" }]);
+      setMessages((m) => [...m, { role: "ai", text: "[Система] Рендеринг видео-потока...", status: "loading", progress: 5 }]);
+      const tick = setInterval(() => {
+        setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(88, (last.progress || 5) + 4); return [...n]; });
+      }, 900);
       try {
         const url = await generateVideo(text);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "Видео готово.", video: url }; return n; });
+        clearInterval(tick);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Видео готово.", video: url, actions: ["🎬 Видео рендеринг завершён", "▶ Доступно для просмотра"] }; return n; });
       } catch (e: unknown) {
+        clearInterval(tick);
         const msg = e instanceof Error ? e.message : "Ошибка";
         toast.error(msg);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `Ошибка: ${msg}` }; return n; });
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
       } finally {
         setBusy(false);
       }
       return;
     }
 
-    // ── ВЕБ-ВЕТКА (HTML-сайт) ───────────────────────────────────
+    // ── ВЕБ-ВЕТКА (HTML-сайт + опц. Supabase) ───────────────────
+    setMessages((m) => [...m, { role: "ai", text: "[Система] Генерация структуры проекта...", status: "loading", progress: 6 }]);
+    const tick = setInterval(() => {
+      setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(94, (last.progress || 6) + 6); return [...n]; });
+    }, 500);
+
     const ctx = filesContextForAi(files);
     const history: ChatMessage[] = [];
     if (ctx) history.push({ role: "user", content: ctx });
@@ -247,20 +286,26 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
 
     try {
       const reply = await chat(history);
-      const html = extractHtml(reply);
+      clearInterval(tick);
+      const { actions, rest } = extractActions(reply);
+      const html = extractHtml(rest || reply);
       if (html) {
-        setPreviewHtml(html);
-        const nextFiles = { ...files, "index.html": html };
+        const sb = getSettings().supabase;
+        const finalHtml = sb.url && sb.anonKey ? injectSupabase(html, sb.url, sb.anonKey) : html;
+        setPreviewHtml(finalHtml);
+        const nextFiles = { ...files, "index.html": finalHtml };
         setFilesState(nextFiles);
         saveFiles(nextFiles);
-        setMessages((m) => [...m, { role: "ai", text: "Готово. Сайт обновлён в превью справа и сохранён в проект." }]);
+        const finalActions = actions.length ? actions : ["🔨 Структура собрана", "🎨 Стили применены", "🚀 Превью обновлено"];
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Сборка завершена.", actions: finalActions, progress: 100 }; return n; });
       } else {
-        setMessages((m) => [...m, { role: "ai", text: reply }]);
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: reply, actions }; return n; });
       }
     } catch (e: unknown) {
+      clearInterval(tick);
       const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
       toast.error(msg);
-      setMessages((m) => [...m, { role: "ai", text: `Ошибка: ${msg}` }]);
+      setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
     } finally {
       setBusy(false);
     }
@@ -294,12 +339,27 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
                     : "bg-secondary text-foreground rounded-bl-md border border-border"
                 }`}>
                   {m.status === "loading" ? (
-                    <div className="flex items-center gap-2.5">
-                      <AntTyping size={42} />
-                      <span className="font-mono text-xs">{m.text}<span className="animate-cursor">|</span></span>
+                    <div className="space-y-2 min-w-[220px]">
+                      <div className="flex items-center gap-2.5">
+                        <AntTyping size={42} />
+                        <span className="font-mono text-xs">{m.text}<span className="animate-cursor">|</span></span>
+                      </div>
+                      <div className="h-1 rounded-full bg-background overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-purple-500 to-orange-500 transition-all duration-500" style={{ width: `${m.progress || 0}%` }} />
+                      </div>
+                      <div className="font-mono text-[10px] text-muted-foreground text-right">{m.progress || 0}%</div>
                     </div>
                   ) : (
                     <>{m.text}</>
+                  )}
+                  {m.actions && m.actions.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {m.actions.map((a, k) => (
+                        <span key={k} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-background/60 border border-purple-500/30 text-purple-300">
+                          {a}
+                        </span>
+                      ))}
+                    </div>
                   )}
                   {m.image && (
                     <div className="mt-2 rounded-lg overflow-hidden border border-border">
@@ -860,9 +920,123 @@ function PaymentsPanel() {
 
 function SystemPanel() {
   const [s, set] = useSettings();
+  const [sql, setSql] = useState("");
+  const [appKeyName, setAppKeyName] = useState("");
+  const [appKeyVal, setAppKeyVal] = useState("");
+
+  async function onPingSupabase() {
+    try {
+      toast.loading("Проверяем Supabase...", { id: "sb" });
+      await pingSupabase();
+      toast.success("Supabase подключён", { id: "sb" });
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Ошибка", { id: "sb" });
+    }
+  }
+
+  async function onApplySql() {
+    if (!sql.trim()) return toast.error("Введите SQL");
+    try {
+      toast.loading("[Система] Применение SQL...", { id: "sql" });
+      await applySql(sql);
+      toast.success("Схема применена", { id: "sql" });
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Ошибка", { id: "sql" });
+    }
+  }
+
+  function addAppKey() {
+    if (!appKeyName.trim()) return toast.error("Укажите имя ключа");
+    set((c) => ({ ...c, appKeys: { ...c.appKeys, [appKeyName.trim()]: appKeyVal } }));
+    setAppKeyName(""); setAppKeyVal("");
+    toast.success("Ключ приложения сохранён");
+  }
+
+  function removeAppKey(k: string) {
+    set((c) => {
+      const next = { ...c.appKeys };
+      delete next[k];
+      return { ...c, appKeys: next };
+    });
+  }
 
   return (
     <div className="space-y-4 animate-fade-up">
+      <Card title="Supabase · БД и Авторизация" accent="purple" badge="Бэкенд">
+        <div className="flex items-center gap-3 mb-4 p-3 rounded-lg bg-purple-500/5 border border-purple-500/20">
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-black font-bold">S</div>
+          <div className="flex-1">
+            <div className="font-medium text-sm">Supabase Backend</div>
+            <div className="text-xs text-muted-foreground">PostgreSQL · Auth · Storage · RLS</div>
+          </div>
+          <span className={`text-xs px-2 py-0.5 rounded-full border ${
+            s.supabase.url && s.supabase.anonKey ? "bg-green-500/10 text-green-400 border-green-500/20" : "bg-muted text-muted-foreground border-border"
+          }`}>{s.supabase.url && s.supabase.anonKey ? "Подключено" : "Не настроено"}</span>
+        </div>
+        <div className="grid md:grid-cols-2 gap-4">
+          <Field label="SUPABASE_URL">
+            <Input value={s.supabase.url} onChange={(v) => set((c) => ({ ...c, supabase: { ...c.supabase, url: v } }))} placeholder="https://xxxxx.supabase.co" mono />
+          </Field>
+          <Field label="SUPABASE_ANON_KEY">
+            <Input value={s.supabase.anonKey} onChange={(v) => set((c) => ({ ...c, supabase: { ...c.supabase, anonKey: v } }))} placeholder="eyJhbGciOi..." type="password" mono />
+          </Field>
+          <Field label="SUPABASE_SERVICE_KEY (опц.)" hint="Только для применения SQL из админки">
+            <Input value={s.supabase.serviceKey} onChange={(v) => set((c) => ({ ...c, supabase: { ...c.supabase, serviceKey: v } }))} placeholder="service_role..." type="password" mono />
+          </Field>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button onClick={onPingSupabase} className="px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition">
+            Проверить подключение
+          </button>
+        </div>
+      </Card>
+
+      <Card title="SQL · Автогенерация схем" accent="orange">
+        <p className="text-xs text-muted-foreground mb-3">
+          Попросите в чате «создай таблицу пользователей с авторизацией» — ИИ выдаст SQL. Вставьте его сюда и примените одним кликом.
+        </p>
+        <textarea
+          rows={6}
+          value={sql}
+          onChange={(e) => setSql(e.target.value)}
+          placeholder={`-- Пример\nCREATE TABLE profiles (\n  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  user_id uuid REFERENCES auth.users,\n  display_name text\n);\nALTER TABLE profiles ENABLE ROW LEVEL SECURITY;`}
+          className="w-full bg-secondary border border-border rounded-lg px-4 py-3 text-xs font-mono leading-relaxed focus:border-orange-500/50 focus:outline-none resize-none"
+        />
+        <div className="mt-3 flex justify-end">
+          <button onClick={onApplySql} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">
+            <Icon name="Database" size={14} />
+            Применить SQL
+          </button>
+        </div>
+      </Card>
+
+      <Card title="Ключи приложений · Sandbox" accent="purple" badge="Изолированы">
+        <p className="text-xs text-muted-foreground mb-3">
+          Генерируемые приложения хранят свои собственные API-ключи отдельно от мастер-ключей платформы. Доступ только через <code className="font-mono text-purple-400">window.__APP_KEYS__</code>.
+        </p>
+        <div className="space-y-2 mb-3">
+          {Object.entries(s.appKeys).length === 0 && (
+            <div className="text-xs text-muted-foreground italic">Пока нет ключей приложений</div>
+          )}
+          {Object.entries(s.appKeys).map(([k, v]) => (
+            <div key={k} className="flex items-center gap-2 p-2 rounded-lg bg-secondary border border-border">
+              <span className="font-mono text-xs text-purple-400">{k}</span>
+              <span className="flex-1 font-mono text-xs text-muted-foreground truncate">{v.replace(/./g, "•").slice(0, 24)}</span>
+              <button onClick={() => removeAppKey(k)} className="w-6 h-6 rounded hover:bg-background flex items-center justify-center text-muted-foreground hover:text-red-400 transition">
+                <Icon name="X" size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="grid md:grid-cols-[1fr_2fr_auto] gap-2">
+          <Input value={appKeyName} onChange={setAppKeyName} placeholder="STRIPE_KEY" mono />
+          <Input value={appKeyVal} onChange={setAppKeyVal} placeholder="sk_test_..." type="password" mono />
+          <button onClick={addAppKey} className="px-4 py-2 rounded-lg bg-foreground text-background text-sm font-medium hover:opacity-90 transition">
+            Добавить
+          </button>
+        </div>
+      </Card>
+
       <Card title="Переключатели" accent="purple">
         <div className="space-y-3">
           <Toggle

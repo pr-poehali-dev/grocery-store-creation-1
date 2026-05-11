@@ -34,6 +34,12 @@ export type Settings = {
     selfEdit: boolean;
     publicAi: boolean;
   };
+  supabase: {
+    url: string;
+    anonKey: string;
+    serviceKey: string;
+  };
+  appKeys: Record<string, string>;
   tokens: number;
 };
 
@@ -46,7 +52,7 @@ export const DEFAULT_SETTINGS: Settings = {
     proxyUrl: "",
     temperature: "0.7",
     systemPrompt:
-      "Ты профессиональный веб-разработчик платформы Муравей 2.0. Создаёшь современные сайты на чистом HTML/CSS/JS. ВАЖНО: отвечай ТОЛЬКО одним блоком HTML-кода (с инлайн CSS и JS внутри одного файла index.html). Никаких пояснений вне кода. Дизайн — минималистичный, в духе Linear/Vercel.",
+      "Ты — IDE-агент Муравей 2.0. РЕЖИМ: технический, без приветствий и преамбулы. Формат ответа: сначала строка с атомарными шагами через ' · ' (например: '🔨 Создание схемы БД · 🎨 Tailwind тема · 🚀 Деплой'), затем один блок HTML-кода (с инлайн CSS и JS в index.html). Если пользователь упоминает БД/авторизацию — встрой @supabase/supabase-js через CDN и используй SUPABASE_URL и SUPABASE_ANON_KEY как переменные. Минимализм в духе Linear/Vercel. Никакой воды.",
     imageApiKey: "",
     imageBaseUrl: "https://api.replicate.com/v1",
     imageModel: "black-forest-labs/flux-schnell",
@@ -58,6 +64,8 @@ export const DEFAULT_SETTINGS: Settings = {
   github: { token: "", repo: "", siteUrl: "", branch: "main", proxy: "" },
   payments: { terminalKey: "", password: "" },
   system: { selfEdit: false, publicAi: true },
+  supabase: { url: "", anonKey: "", serviceKey: "" },
+  appKeys: {},
   tokens: 12480,
 };
 
@@ -73,6 +81,8 @@ function load(): Settings {
       github: { ...DEFAULT_SETTINGS.github, ...(parsed.github || {}) },
       payments: { ...DEFAULT_SETTINGS.payments, ...(parsed.payments || {}) },
       system: { ...DEFAULT_SETTINGS.system, ...(parsed.system || {}) },
+      supabase: { ...DEFAULT_SETTINGS.supabase, ...(parsed.supabase || {}) },
+      appKeys: { ...DEFAULT_SETTINGS.appKeys, ...(parsed.appKeys || {}) },
     };
   } catch {
     return DEFAULT_SETTINGS;
