@@ -7,12 +7,12 @@ type Device = "desktop" | "mobile";
 type Msg = { role: "user" | "ai"; text: string };
 
 const TEMPLATES = [
-  { id: 1, title: "Grocery Store", desc: "Магазин продуктов с корзиной", emoji: "🛒", tag: "E-commerce", color: "purple" },
-  { id: 2, title: "Portfolio", desc: "Минималистичное портфолио", emoji: "🎨", tag: "Personal", color: "orange" },
-  { id: 3, title: "SaaS Landing", desc: "Лендинг для стартапа", emoji: "🚀", tag: "Marketing", color: "purple" },
-  { id: 4, title: "Blog Magazine", desc: "Редакторский блог", emoji: "📰", tag: "Content", color: "orange" },
-  { id: 5, title: "Booking App", desc: "Запись на услуги", emoji: "📅", tag: "Service", color: "purple" },
-  { id: 6, title: "Restaurant", desc: "Сайт ресторана с меню", emoji: "🍝", tag: "F&B", color: "orange" },
+  { id: 1, title: "Магазин продуктов", desc: "Онлайн-магазин с корзиной", emoji: "🛒", tag: "Электронная коммерция", color: "purple" },
+  { id: 2, title: "Портфолио", desc: "Минималистичное портфолио", emoji: "🎨", tag: "Личное", color: "orange" },
+  { id: 3, title: "SaaS Лендинг", desc: "Посадочная страница для стартапа", emoji: "🚀", tag: "Маркетинг", color: "purple" },
+  { id: 4, title: "Блог-журнал", desc: "Редакторский блог со статьями", emoji: "📰", tag: "Контент", color: "orange" },
+  { id: 5, title: "Запись на услуги", desc: "Бронирование и календарь", emoji: "📅", tag: "Сервис", color: "purple" },
+  { id: 6, title: "Ресторан", desc: "Сайт ресторана с меню", emoji: "🍝", tag: "Еда и напитки", color: "orange" },
 ];
 
 export default function Index() {
@@ -41,8 +41,8 @@ function TopBar() {
             М
           </div>
           <div className="leading-tight">
-            <div className="font-heading text-base tracking-wider uppercase">Muravey</div>
-            <div className="text-[10px] text-muted-foreground font-mono -mt-0.5">v2.0 · BETA</div>
+            <div className="font-heading text-base tracking-wider uppercase">Муравей</div>
+            <div className="text-[10px] text-muted-foreground font-mono -mt-0.5">v2.0 · БЕТА</div>
           </div>
         </div>
 
@@ -54,7 +54,7 @@ function TopBar() {
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary border border-border">
             <Icon name="Coins" size={12} className="text-orange-500" />
             <span className="font-mono font-medium">12 480</span>
-            <span className="text-muted-foreground">tokens</span>
+            <span className="text-muted-foreground">токенов</span>
           </div>
           <button className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-xs font-bold text-black">
             AK
@@ -72,9 +72,9 @@ function TopBar() {
 // ─── Bottom Nav ───────────────────────────────────────────────────────────────
 function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   const items: { id: Tab; label: string; icon: string }[] = [
-    { id: "chat", label: "Chat", icon: "MessageSquare" },
-    { id: "core", label: "Core", icon: "Cpu" },
-    { id: "projects", label: "Projects", icon: "LayoutGrid" },
+    { id: "chat", label: "Чат", icon: "MessageSquare" },
+    { id: "core", label: "Ядро", icon: "Cpu" },
+    { id: "projects", label: "Проекты", icon: "LayoutGrid" },
   ];
 
   return (
@@ -105,7 +105,7 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 // ─── Chat Tab ─────────────────────────────────────────────────────────────────
 function ChatTab() {
   const [messages, setMessages] = useState<Msg[]>([
-    { role: "ai", text: "Привет. Я Muravey 2.0 — твой AI-разработчик. Опиши сайт, который нужно создать. Я начну писать код прямо в превью справа." },
+    { role: "ai", text: "Привет. Я Муравей 2.0 — твой ИИ-разработчик. Опиши сайт, который нужно создать. Я начну писать код прямо в превью справа." },
   ]);
   const [input, setInput] = useState("");
   const [device, setDevice] = useState<Device>("desktop");
@@ -128,7 +128,7 @@ function ChatTab() {
           <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Icon name="Sparkles" size={14} className="text-purple-500" />
-              <h2 className="font-heading uppercase tracking-wider text-sm">AI Workspace</h2>
+              <h2 className="font-heading uppercase tracking-wider text-sm">Рабочее пространство ИИ</h2>
             </div>
             <button className="text-xs text-muted-foreground hover:text-foreground transition">
               <Icon name="RotateCcw" size={14} />
@@ -155,7 +155,7 @@ function ChatTab() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder="Опишите ваш сайт... поддерживается markdown"
+                placeholder="Опишите ваш сайт... поддерживается разметка"
                 rows={2}
                 className="w-full bg-transparent text-sm placeholder:text-muted-foreground resize-none focus:outline-none"
               />
@@ -176,7 +176,7 @@ function ChatTab() {
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-xs font-bold hover:opacity-90 transition"
                 >
                   <Icon name="Send" size={12} />
-                  Create Site
+                  Создать сайт
                 </button>
               </div>
             </div>
@@ -193,7 +193,7 @@ function ChatTab() {
                 <span className="w-2.5 h-2.5 rounded-full bg-green-500/40" />
               </div>
               <div className="ml-3 flex-1 min-w-0 font-mono text-xs text-muted-foreground truncate">
-                preview.muravey.app/projects/untitled-2
+                muravey.app/проекты/без-названия-2
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -213,7 +213,7 @@ function ChatTab() {
               </div>
               <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-secondary border border-border text-xs font-medium hover:bg-foreground hover:text-background transition">
                 <Icon name="ExternalLink" size={12} />
-                Live Site
+                Открыть сайт
               </button>
             </div>
           </div>
@@ -250,17 +250,17 @@ function CoreTab() {
   const [sub, setSub] = useState<CoreTab>("ai");
 
   const subTabs: { id: CoreTab; label: string; icon: string }[] = [
-    { id: "ai", label: "AI Engine", icon: "Brain" },
+    { id: "ai", label: "ИИ-движок", icon: "Brain" },
     { id: "github", label: "GitHub", icon: "Github" },
-    { id: "payments", label: "Payments", icon: "CreditCard" },
-    { id: "system", label: "System", icon: "Settings" },
+    { id: "payments", label: "Платежи", icon: "CreditCard" },
+    { id: "system", label: "Система", icon: "Settings" },
   ];
 
   return (
     <div className="max-w-5xl mx-auto px-4 md:px-6 pt-6 animate-fade-up">
       <div className="mb-6">
-        <div className="font-mono text-xs text-muted-foreground mb-1">/ admin / core</div>
-        <h1 className="font-heading text-4xl">Core Panel</h1>
+        <div className="font-mono text-xs text-muted-foreground mb-1">/ админ / ядро</div>
+        <h1 className="font-heading text-4xl">Панель ядра</h1>
         <p className="text-muted-foreground text-sm mt-1">Настройки движка, интеграций и системы</p>
       </div>
 
@@ -297,9 +297,9 @@ function AIPanel() {
 
   return (
     <div className="space-y-4 animate-fade-up">
-      <Card title="Provider & Model" accent="purple">
+      <Card title="Провайдер и модель" accent="purple">
         <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Provider">
+          <Field label="Провайдер">
             <div className="flex gap-1.5">
               {providers.map((p) => (
                 <button
@@ -316,7 +316,7 @@ function AIPanel() {
               ))}
             </div>
           </Field>
-          <Field label="Model">
+          <Field label="Модель">
             <select className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:border-purple-500/50 focus:outline-none">
               {models.map((m) => <option key={m}>{m}</option>)}
             </select>
@@ -324,34 +324,34 @@ function AIPanel() {
         </div>
       </Card>
 
-      <Card title="API Credentials" accent="orange">
+      <Card title="Доступы к API" accent="orange">
         <div className="grid md:grid-cols-2 gap-4">
-          <Field label="API Key">
+          <Field label="API-ключ">
             <Input placeholder="sk-ant-..." type="password" mono />
           </Field>
-          <Field label="Base URL">
+          <Field label="Базовый URL">
             <Input placeholder="https://api.anthropic.com/v1" mono />
           </Field>
-          <Field label="Proxy URL" hint="Для обхода ограничений">
+          <Field label="Прокси URL" hint="Для обхода ограничений">
             <Input placeholder="https://proxy.muravey.app" mono />
           </Field>
-          <Field label="Temperature">
+          <Field label="Температура">
             <Input placeholder="0.7" mono />
           </Field>
         </div>
       </Card>
 
-      <Card title="System Prompt" accent="purple">
+      <Card title="Системный промпт" accent="purple">
         <textarea
           rows={8}
-          defaultValue={`You are a professional web designer at Muravey 2.0.\nYour expertise: React, Tailwind CSS, modern UI/UX patterns.\nAlways produce production-grade, accessible code.\nFollow Linear/Vercel minimalist aesthetics by default.`}
+          defaultValue={`Ты профессиональный веб-дизайнер платформы Муравей 2.0.\nЭкспертиза: React, Tailwind CSS, современные паттерны UI/UX.\nВсегда создавай продакшен-код с доступностью.\nПо умолчанию следуй минималистичной эстетике Linear/Vercel.`}
           className="w-full bg-secondary border border-border rounded-lg px-4 py-3 text-sm font-mono leading-relaxed focus:border-purple-500/50 focus:outline-none resize-none"
         />
       </Card>
 
       <div className="flex justify-end gap-2">
-        <button className="px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition">Test Connection</button>
-        <button className="px-5 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">Save Configuration</button>
+        <button className="px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition">Проверить подключение</button>
+        <button className="px-5 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">Сохранить настройки</button>
       </div>
     </div>
   );
@@ -360,33 +360,33 @@ function AIPanel() {
 function GitHubPanel() {
   return (
     <div className="space-y-4 animate-fade-up">
-      <Card title="Repository" accent="purple">
+      <Card title="Репозиторий" accent="purple">
         <div className="grid md:grid-cols-2 gap-4">
-          <Field label="GitHub Token">
+          <Field label="Токен GitHub">
             <Input placeholder="ghp_..." type="password" mono />
           </Field>
-          <Field label="Repo Path">
-            <Input placeholder="user/repo" mono />
+          <Field label="Путь к репозиторию">
+            <Input placeholder="пользователь/репо" mono />
           </Field>
-          <Field label="Site URL">
-            <Input placeholder="https://my-site.com" mono />
+          <Field label="Адрес сайта">
+            <Input placeholder="https://мой-сайт.ru" mono />
           </Field>
-          <Field label="Branch">
+          <Field label="Ветка">
             <Input placeholder="main" mono />
           </Field>
         </div>
       </Card>
 
-      <Card title="ZIP Engine" accent="orange" badge="Admin Only">
-        <p className="text-xs text-muted-foreground mb-4">Импорт/экспорт проекта одним архивом. Файлы распаковываются в память браузера и попадают в контекст ИИ.</p>
+      <Card title="ZIP-движок" accent="orange" badge="Только админ">
+        <p className="text-xs text-muted-foreground mb-4">Импорт и экспорт проекта одним архивом. Файлы распаковываются в память браузера и попадают в контекст ИИ.</p>
         <div className="grid md:grid-cols-2 gap-3">
           <button className="group flex items-center gap-3 p-4 rounded-xl border border-dashed border-border hover:border-orange-500/50 hover:bg-orange-500/5 transition text-left">
             <div className="w-10 h-10 rounded-lg bg-orange-500/10 border border-orange-500/20 flex items-center justify-center group-hover:scale-105 transition">
               <Icon name="Upload" size={16} className="text-orange-500" />
             </div>
             <div className="flex-1">
-              <div className="font-medium text-sm">Upload .zip</div>
-              <div className="text-xs text-muted-foreground font-mono">→ extract to AI context</div>
+              <div className="font-medium text-sm">Загрузить .zip</div>
+              <div className="text-xs text-muted-foreground font-mono">→ распаковать в контекст ИИ</div>
             </div>
           </button>
           <button className="group flex items-center gap-3 p-4 rounded-xl border border-dashed border-border hover:border-purple-500/50 hover:bg-purple-500/5 transition text-left">
@@ -394,8 +394,8 @@ function GitHubPanel() {
               <Icon name="Download" size={16} className="text-purple-500" />
             </div>
             <div className="flex-1">
-              <div className="font-medium text-sm">Download .zip</div>
-              <div className="text-xs text-muted-foreground font-mono">→ export current build</div>
+              <div className="font-medium text-sm">Скачать .zip</div>
+              <div className="text-xs text-muted-foreground font-mono">→ выгрузить текущую сборку</div>
             </div>
           </button>
         </div>
@@ -407,20 +407,20 @@ function GitHubPanel() {
 function PaymentsPanel() {
   return (
     <div className="space-y-4 animate-fade-up">
-      <Card title="T-Bank Integration" accent="orange">
+      <Card title="Интеграция Т-Банк" accent="orange">
         <div className="flex items-center gap-3 mb-4 p-3 rounded-lg bg-orange-500/5 border border-orange-500/20">
-          <div className="w-9 h-9 rounded-lg bg-orange-500 flex items-center justify-center text-black font-bold">T</div>
+          <div className="w-9 h-9 rounded-lg bg-orange-500 flex items-center justify-center text-black font-bold">Т</div>
           <div>
-            <div className="font-medium text-sm">T-Bank Business</div>
-            <div className="text-xs text-muted-foreground">Эквайринг + СБП</div>
+            <div className="font-medium text-sm">Т-Банк Бизнес</div>
+            <div className="text-xs text-muted-foreground">Эквайринг и СБП</div>
           </div>
-          <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400 border border-green-500/20">Active</span>
+          <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400 border border-green-500/20">Активно</span>
         </div>
         <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Terminal Key">
+          <Field label="Ключ терминала">
             <Input placeholder="1234567890DEMO" mono />
           </Field>
-          <Field label="Password">
+          <Field label="Пароль">
             <Input placeholder="••••••••••" type="password" mono />
           </Field>
         </div>
@@ -437,12 +437,12 @@ function PaymentsPanel() {
           </div>
           <div className="space-y-3">
             <div>
-              <div className="text-xs text-muted-foreground font-mono mb-1">QR · Token top-up</div>
-              <div className="font-heading text-3xl">990 ₽ → 5 000 tokens</div>
+              <div className="text-xs text-muted-foreground font-mono mb-1">QR · Пополнение токенов</div>
+              <div className="font-heading text-3xl">990 ₽ → 5 000 токенов</div>
             </div>
             <div className="flex gap-2">
-              <button className="px-3 py-2 rounded-lg bg-secondary border border-border text-xs hover:bg-foreground hover:text-background transition">Regenerate QR</button>
-              <button className="px-3 py-2 rounded-lg bg-secondary border border-border text-xs hover:bg-foreground hover:text-background transition">Copy Link</button>
+              <button className="px-3 py-2 rounded-lg bg-secondary border border-border text-xs hover:bg-foreground hover:text-background transition">Обновить QR</button>
+              <button className="px-3 py-2 rounded-lg bg-secondary border border-border text-xs hover:bg-foreground hover:text-background transition">Копировать ссылку</button>
             </div>
           </div>
         </div>
@@ -457,18 +457,18 @@ function SystemPanel() {
 
   return (
     <div className="space-y-4 animate-fade-up">
-      <Card title="Toggles" accent="purple">
+      <Card title="Переключатели" accent="purple">
         <div className="space-y-3">
           <Toggle
-            label="Self-Edit Mode"
+            label="Режим самообновления"
             hint="Платформа может редактировать саму себя"
             on={selfEdit}
             setOn={setSelfEdit}
             color="purple"
           />
           <Toggle
-            label="Public AI Access"
-            hint="Открытый доступ к API ассистента"
+            label="Открытый доступ к ИИ"
+            hint="Публичный доступ к API ассистента"
             on={publicAi}
             setOn={setPublicAi}
             color="orange"
@@ -476,14 +476,14 @@ function SystemPanel() {
         </div>
       </Card>
 
-      <Card title="Danger Zone" accent="orange">
+      <Card title="Опасная зона" accent="orange">
         <div className="flex items-center justify-between gap-4 p-3 rounded-lg border border-red-500/20 bg-red-500/5">
           <div>
-            <div className="font-medium text-sm">Reset Balance</div>
+            <div className="font-medium text-sm">Сброс баланса</div>
             <div className="text-xs text-muted-foreground">Сбросить счётчик токенов всех пользователей</div>
           </div>
           <button className="px-4 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-medium hover:bg-red-500/20 transition">
-            Reset
+            Сбросить
           </button>
         </div>
       </Card>
@@ -497,18 +497,18 @@ function ProjectsTab({ onUse }: { onUse: () => void }) {
     <div className="max-w-7xl mx-auto px-4 md:px-6 pt-6 animate-fade-up">
       <div className="flex items-end justify-between mb-8 flex-wrap gap-4">
         <div>
-          <div className="font-mono text-xs text-muted-foreground mb-1">/ projects / templates</div>
-          <h1 className="font-heading text-4xl">Templates</h1>
+          <div className="font-mono text-xs text-muted-foreground mb-1">/ проекты / шаблоны</div>
+          <h1 className="font-heading text-4xl">Шаблоны</h1>
           <p className="text-muted-foreground text-sm mt-1">Готовые шаблоны для быстрого старта</p>
         </div>
         <div className="flex gap-2">
           <button className="flex items-center gap-2 px-4 py-2 rounded-lg bg-secondary border border-border text-sm hover:bg-foreground hover:text-background transition">
             <Icon name="Filter" size={13} />
-            Filters
+            Фильтры
           </button>
           <button className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">
             <Icon name="Plus" size={13} />
-            New Project
+            Новый проект
           </button>
         </div>
       </div>
@@ -546,7 +546,7 @@ function ProjectsTab({ onUse }: { onUse: () => void }) {
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-foreground text-background text-xs font-medium hover:opacity-90 transition"
                 >
                   <Icon name="Wand2" size={12} />
-                  Use Template
+                  Использовать шаблон
                 </button>
                 <button className="px-3 py-2 rounded-lg border border-border text-xs hover:bg-secondary transition">
                   <Icon name="Eye" size={12} />
