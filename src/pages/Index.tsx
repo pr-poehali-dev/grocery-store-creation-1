@@ -1,1739 +1,541 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 import Icon from "@/components/ui/icon";
-import { useSettings, getSettings, type Settings } from "@/lib/store";
-import { chat, extractHtml, type ChatMessage } from "@/lib/ai";
-import { importZip, exportZip, findIndexHtml, loadFiles, saveFiles, filesContextForAi, type ProjectFiles } from "@/lib/files";
-import { commitToGitHub, pingGitHub } from "@/lib/github";
 import { toast } from "sonner";
-import { AntTyping } from "@/components/AntTyping";
-import { BackgroundAnt } from "@/components/BackgroundAnt";
-import { detectIntent, generateImage, generateVideo, generateAudio, fileToBase64 } from "@/lib/media";
-import { pingSupabase, applySql } from "@/lib/supabase";
-import { AuthGate } from "@/components/AuthGate";
-import { SupportWidget } from "@/components/SupportWidget";
-import {
-  useAuth, signOut, addModerator, removeModerator, transferOwnership,
-  setTokensFor, banUser, deleteUser, checkContent, logAudit, clearAudit, consumeToken, syncTopBalance,
-} from "@/lib/auth";
-import { useSupport, addMessage, resolveThread, markReadForAdmin } from "@/lib/support";
-import {
-  useIntegrations, addIntegration, updateIntegration, removeIntegration,
-  pingIntegration, buildLeadInjector, getIntegrationsSnapshot, KIND_LABEL, KIND_HINT, type IntegrationKind,
-} from "@/lib/integrations";
 
-type Tab = "chat" | "core" | "projects";
-type CoreTab = "ai" | "github" | "payments" | "system" | "logs" | "users" | "dialogs" | "integrations";
-type Device = "desktop" | "mobile";
-type Msg = {
-  role: "user" | "ai";
-  text: string;
-  image?: string;
-  video?: string;
-  audio?: string;
-  status?: "loading";
-  actions?: string[];
-  progress?: number;
-  sql?: string;
-};
+const HERO_IMG = "https://cdn.poehali.dev/projects/5f88b64f-b745-4b46-b3ef-4e3ff3a00764/files/51cb0979-3fe7-40f1-98c1-84f183a566b0.jpg";
+const STORE_IMG = "https://cdn.poehali.dev/projects/5f88b64f-b745-4b46-b3ef-4e3ff3a00764/files/82e9bcf1-fa07-49f8-be7d-18f4a4de998d.jpg";
 
-function extractActions(text: string): { actions: string[]; rest: string } {
-  const firstLine = text.split("\n").find((l) => l.trim().length > 0) || "";
-  if (firstLine.includes("·") && firstLine.length < 240) {
-    const actions = firstLine.split("·").map((s) => s.trim()).filter(Boolean);
-    if (actions.length >= 2 && actions.length <= 8) {
-      return { actions, rest: text.replace(firstLine, "").trim() };
-    }
-  }
-  return { actions: [], rest: text };
-}
+const CATEGORIES = [
+  { name: "Овощи", icon: "Carrot", desc: "С грядки от местных фермеров", color: "bg-fresh-leaf/20 text-fresh-olive" },
+  { name: "Фрукты", icon: "Apple", desc: "Сезонные и спелые", color: "bg-fresh-terra/15 text-fresh-terra" },
+  { name: "Зелень", icon: "Leaf", desc: "Срезана этим утром", color: "bg-fresh-grass/15 text-fresh-olive" },
+  { name: "Молочное", icon: "Milk", desc: "От частных хозяйств", color: "bg-fresh-sand/30 text-fresh-ink" },
+  { name: "Хлеб", icon: "Wheat", desc: "Печём каждый день", color: "bg-fresh-terra/15 text-fresh-terra" },
+  { name: "Мясо и рыба", icon: "Fish", desc: "Охлаждённое, без заморозки", color: "bg-fresh-berry/15 text-fresh-berry" },
+];
 
-function injectSupabase(html: string, url: string, anonKey: string): string {
-  if (!html.toLowerCase().includes("supabase")) return html;
-  const inject = `<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script>window.__SUPABASE_URL__=${JSON.stringify(url)};window.__SUPABASE_ANON_KEY__=${JSON.stringify(anonKey)};window.supabaseClient=window.supabase&&window.supabase.createClient(window.__SUPABASE_URL__,window.__SUPABASE_ANON_KEY__);</script>`;
-  if (html.includes("</head>")) return html.replace("</head>", `${inject}\n</head>`);
-  return inject + html;
-}
+const PRODUCTS = [
+  { name: "Помидоры черри", weight: "500 г", price: 320, badge: "Хит" },
+  { name: "Антоновка", weight: "1 кг", price: 180, badge: null },
+  { name: "Базилик зелёный", weight: "пучок", price: 90, badge: "Свежий" },
+  { name: "Творог фермерский", weight: "350 г", price: 240, badge: null },
+  { name: "Хлеб на закваске", weight: "500 г", price: 210, badge: "Новинка" },
+  { name: "Сёмга охлаждённая", weight: "300 г", price: 690, badge: null },
+];
 
-const TEMPLATES = [
-  { id: 1, title: "Магазин продуктов", desc: "Онлайн-магазин с корзиной", emoji: "🛒", tag: "Электронная коммерция", color: "purple", prompt: "Сделай красивый магазин продуктов с карточками товаров, корзиной и итоговой суммой." },
-  { id: 2, title: "Портфолио", desc: "Минималистичное портфолио", emoji: "🎨", tag: "Личное", color: "orange", prompt: "Создай минималистичное портфолио дизайнера с шапкой, проектами в сетке и контактами." },
-  { id: 3, title: "SaaS Лендинг", desc: "Посадочная страница для стартапа", emoji: "🚀", tag: "Маркетинг", color: "purple", prompt: "Создай SaaS-лендинг с hero, фичами в 3 колонки, тарифами и формой подписки." },
-  { id: 4, title: "Блог-журнал", desc: "Редакторский блог со статьями", emoji: "📰", tag: "Контент", color: "orange", prompt: "Сделай блог-журнал с крупным заголовком, обложкой статьи и сеткой превью записей." },
-  { id: 5, title: "Запись на услуги", desc: "Бронирование и календарь", emoji: "📅", tag: "Сервис", color: "purple", prompt: "Создай страницу записи на услуги с выбором даты, времени и формой контактов." },
-  { id: 6, title: "Ресторан", desc: "Сайт ресторана с меню", emoji: "🍝", tag: "Еда и напитки", color: "orange", prompt: "Создай сайт ресторана: hero с фото, разделы меню по категориям, бронирование столика." },
+const FEATURES = [
+  { icon: "Truck", title: "Доставка за 90 минут", desc: "По городу — бесплатно от 1500 ₽" },
+  { icon: "Sprout", title: "Только фермерское", desc: "Работаем напрямую с 32 хозяйствами" },
+  { icon: "ShieldCheck", title: "Гарантия свежести", desc: "Не понравилось — вернём деньги" },
+  { icon: "Clock", title: "Открыто 8:00–22:00", desc: "Без выходных и перерывов" },
 ];
 
 export default function Index() {
-  return (
-    <AuthGate>
-      <IndexInner />
-    </AuthGate>
-  );
-}
-
-function IndexInner() {
-  const [tab, setTab] = useState<Tab>("chat");
-  const [presetPrompt, setPresetPrompt] = useState("");
-  const { isModerator } = useAuth();
-
-  useEffect(() => { syncTopBalance(); }, []);
-
-  // Если не модератор/админ — насильно прячем «Мозг»
-  useEffect(() => {
-    if (tab === "core" && !isModerator) setTab("chat");
-  }, [isModerator, tab]);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className="min-h-screen bg-background text-foreground grid-bg relative">
-      <BackgroundAnt />
-      <div className="relative z-10">
-        <TopBar />
-        <main className="pb-24">
-          {tab === "chat" && <ChatTab presetPrompt={presetPrompt} clearPreset={() => setPresetPrompt("")} />}
-          {tab === "core" && isModerator && <CoreTab />}
-          {tab === "projects" && (
-            <ProjectsTab onUse={(p) => { setPresetPrompt(p); setTab("chat"); }} />
-          )}
-        </main>
-        <BottomNav tab={tab} setTab={setTab} />
-        <SupportWidget />
-      </div>
+    <div className="min-h-screen bg-background text-foreground">
+      <Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} />
+      <Hero />
+      <Categories />
+      <About />
+      <Bestsellers />
+      <Delivery />
+      <Contacts />
+      <Footer />
     </div>
   );
 }
 
-// ─── Top Bar ──────────────────────────────────────────────────────────────────
-function TopBar() {
-  const [s] = useSettings();
-  const { session } = useAuth();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const initials = session?.email ? session.email.slice(0, 2).toUpperCase() : "??";
-  const roleColor = session?.role === "superadmin" ? "text-orange-400" : session?.role === "moderator" ? "text-purple-400" : "text-muted-foreground";
-  const roleLabel = session?.role === "superadmin" ? "OWNER" : session?.role === "moderator" ? "MOD" : "USER";
-
+// ─── Header ─────────────────────────────────────────────────────────────────
+function Header({ menuOpen, setMenuOpen }: { menuOpen: boolean; setMenuOpen: (v: boolean) => void }) {
+  const links = [
+    { href: "#categories", label: "Ассортимент" },
+    { href: "#about", label: "О нас" },
+    { href: "#delivery", label: "Доставка" },
+    { href: "#contacts", label: "Контакты" },
+  ];
   return (
-    <header className="sticky top-0 z-40 backdrop-blur-xl bg-background/70 border-b border-border">
-      <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center font-heading font-bold text-sm text-black">
-            М
+    <header className="sticky top-0 z-40 bg-background/85 backdrop-blur-xl border-b border-border">
+      <div className="max-w-6xl mx-auto px-5 md:px-8 h-16 flex items-center justify-between">
+        <a href="#top" className="flex items-center gap-2.5">
+          <div className="w-10 h-10 rounded-full bg-fresh-olive flex items-center justify-center">
+            <Icon name="Leaf" size={18} className="text-fresh-cream" />
           </div>
           <div className="leading-tight">
-            <div className="font-heading text-base tracking-wider uppercase">Муравей</div>
-            <div className="text-[10px] text-muted-foreground font-mono -mt-0.5">v2.0 · БЕТА</div>
+            <div className="font-heading text-2xl text-fresh-ink">Фрэшь</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground -mt-0.5">фермерские продукты</div>
           </div>
-        </div>
+        </a>
 
-        <div className="hidden md:flex items-center gap-4 text-xs">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary border border-border">
-            <span className={`w-1.5 h-1.5 rounded-full ${s.ai.apiKey ? "bg-green-500" : "bg-muted-foreground"} animate-pulse-dot`} />
-            <span className="font-mono text-muted-foreground">{s.ai.provider} · {s.ai.model}</span>
-          </div>
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary border border-border">
-            <Icon name="Coins" size={12} className="text-orange-500" />
-            <span className="font-mono font-medium">{(session?.tokens ?? s.tokens).toLocaleString("ru-RU")}</span>
-            <span className="text-muted-foreground">токенов</span>
-          </div>
-          <div className="relative">
-            <button
-              onClick={() => setMenuOpen((v) => !v)}
-              className="flex items-center gap-2 pl-1 pr-3 py-1 rounded-full bg-secondary border border-border hover:border-purple-500/50 transition"
-            >
-              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-[10px] font-bold text-black">
-                {initials}
-              </div>
-              <span className={`font-mono text-[10px] uppercase tracking-wider ${roleColor}`}>{roleLabel}</span>
-            </button>
-            {menuOpen && (
-              <div className="absolute right-0 top-12 w-64 bg-card border border-border rounded-xl shadow-2xl p-2 z-50 animate-fade-up">
-                <div className="px-3 py-2 border-b border-border mb-1">
-                  <div className="font-mono text-xs truncate">{session?.email}</div>
-                  <div className={`text-[10px] font-mono uppercase tracking-wider mt-0.5 ${roleColor}`}>{roleLabel}</div>
-                </div>
-                <button
-                  onClick={() => { signOut(); setMenuOpen(false); toast.success("Вы вышли"); }}
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm hover:bg-secondary transition text-left"
-                >
-                  <Icon name="LogOut" size={14} /> Выйти
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
+        <nav className="hidden md:flex items-center gap-7">
+          {links.map((l) => (
+            <a key={l.href} href={l.href} className="text-sm text-foreground hover:text-fresh-olive transition relative group">
+              {l.label}
+              <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-fresh-olive transition-all group-hover:w-full" />
+            </a>
+          ))}
+        </nav>
 
-        <button onClick={() => setMenuOpen((v) => !v)} className="md:hidden w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-xs font-bold text-black">
-          {initials}
-        </button>
+        <div className="flex items-center gap-2">
+          <a href="tel:+74950000000" className="hidden md:flex items-center gap-2 text-sm font-medium text-foreground hover:text-fresh-olive transition">
+            <Icon name="Phone" size={14} />
+            +7 (495) 000-00-00
+          </a>
+          <button
+            onClick={() => setMenuOpen(!menuOpen)}
+            className="md:hidden w-10 h-10 rounded-full bg-fresh-beige flex items-center justify-center"
+          >
+            <Icon name={menuOpen ? "X" : "Menu"} size={18} />
+          </button>
+        </div>
       </div>
+
+      {menuOpen && (
+        <div className="md:hidden border-t border-border bg-background animate-fade-up">
+          <div className="px-5 py-4 space-y-2">
+            {links.map((l) => (
+              <a
+                key={l.href}
+                href={l.href}
+                onClick={() => setMenuOpen(false)}
+                className="block py-2 text-base"
+              >
+                {l.label}
+              </a>
+            ))}
+            <a href="tel:+74950000000" className="block py-2 text-base text-fresh-olive font-medium">
+              +7 (495) 000-00-00
+            </a>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
 
-// ─── Bottom Nav ───────────────────────────────────────────────────────────────
-function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
-  const { isModerator } = useAuth();
-  const { pendingCount, totalUnread } = useSupport();
-  const items: { id: Tab; label: string; icon: string; dot?: number }[] = [
-    { id: "chat", label: "Чат", icon: "MessageSquare" },
-    ...(isModerator ? [{ id: "core" as Tab, label: "Мозг", icon: "Brain", dot: pendingCount + totalUnread }] : []),
-    { id: "projects", label: "Проекты", icon: "LayoutGrid" },
-  ];
-
+// ─── Hero ───────────────────────────────────────────────────────────────────
+function Hero() {
   return (
-    <nav className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50">
-      <div className="flex items-center gap-1 p-1.5 rounded-full bg-card/90 backdrop-blur-xl border border-border shadow-2xl">
-        {items.map((item) => {
-          const active = tab === item.id;
-          return (
-            <button
-              key={item.id}
-              onClick={() => setTab(item.id)}
-              className={`relative flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-medium transition-all ${
-                active ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-              }`}
+    <section id="top" className="relative overflow-hidden">
+      <div className="max-w-6xl mx-auto px-5 md:px-8 pt-12 md:pt-20 pb-14 md:pb-24 grid lg:grid-cols-[1.05fr_1fr] gap-10 lg:gap-14 items-center">
+        <div className="relative z-10 animate-fade-up">
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-fresh-leaf/25 border border-fresh-olive/30 text-fresh-olive text-xs font-medium mb-6">
+            <span className="w-1.5 h-1.5 rounded-full bg-fresh-olive animate-pulse-dot" />
+            Сегодня привезли свежие огурцы и зелень
+          </div>
+
+          <h1 className="font-heading text-5xl md:text-7xl text-fresh-ink leading-[1.05] mb-5">
+            Свежесть<br />
+            <span className="text-fresh-olive italic">прямо с грядки</span>
+          </h1>
+          <p className="text-base md:text-lg text-muted-foreground max-w-md mb-8 leading-relaxed">
+            Фермерские овощи, фрукты, хлеб и молочное. Доставим за 90 минут — пока ваш чай ещё горячий.
+          </p>
+
+          <div className="flex flex-wrap gap-3">
+            <a
+              href="#categories"
+              className="flex items-center gap-2 px-6 py-3.5 rounded-full bg-fresh-olive text-fresh-cream text-sm font-medium hover:bg-fresh-ink transition shadow-lg shadow-fresh-olive/20"
             >
-              <Icon name={item.icon} fallback="Circle" size={15} />
-              <span className="font-heading uppercase tracking-wider text-xs">{item.label}</span>
-              {item.dot ? (
-                <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-[16px] px-1 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
-                  {item.dot}
-                </span>
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
-    </nav>
-  );
-}
-
-// ─── Chat Tab ─────────────────────────────────────────────────────────────────
-function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPreset: () => void }) {
-  const [messages, setMessages] = useState<Msg[]>([
-    { role: "ai", text: "[Система] Готов. Опишите задачу — сайт, БД, медиа.", actions: ["⚡ Готов к работе", "🧠 Контекст пуст", "🔌 Жду команды"] },
-  ]);
-  const [input, setInput] = useState("");
-  const [device, setDevice] = useState<Device>("desktop");
-  const [previewHtml, setPreviewHtml] = useState<string>("");
-  const [busy, setBusy] = useState(false);
-  const [files, setFilesState] = useState<ProjectFiles>(() => loadFiles());
-  const [attached, setAttached] = useState<{ name: string; data: string } | null>(null);
-  const photoRef = useRef<HTMLInputElement>(null);
-  const auth = useAuth();
-
-  useEffect(() => {
-    const idx = findIndexHtml(files);
-    if (idx) setPreviewHtml(idx);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (presetPrompt) {
-      setInput(presetPrompt);
-      clearPreset();
-    }
-  }, [presetPrompt, clearPreset]);
-
-  useEffect(() => {
-    const fn = () => {
-      const f = loadFiles();
-      setFilesState(f);
-      const idx = findIndexHtml(f);
-      if (idx) setPreviewHtml(idx);
-    };
-    window.addEventListener("muravey:project-updated", fn);
-    return () => window.removeEventListener("muravey:project-updated", fn);
-  }, []);
-
-  async function onPickPhoto(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    try {
-      const data = await fileToBase64(f);
-      setAttached({ name: f.name, data });
-      toast.success("Фото прикреплено. Опишите, что с ним сделать.");
-    } catch {
-      toast.error("Не удалось загрузить фото");
-    } finally {
-      if (photoRef.current) photoRef.current.value = "";
-    }
-  }
-
-  async function send() {
-    const text = input.trim();
-    if ((!text && !attached) || busy) return;
-
-    // Content filter
-    const check = checkContent(text);
-    const sessEmail = auth.session?.email || "anonymous";
-    const sessRole = auth.session?.role || "user";
-
-    if (!check.ok) {
-      setMessages((m) => [...m, { role: "user", text }]);
-      setMessages((m) => [...m, { role: "ai", text: "[Система] Запрос отклонён политикой безопасности", actions: ["🚫 Контент-фильтр", check.reason || "Стоп-слово"] }]);
-      logAudit({ email: sessEmail, role: sessRole, intent: "blocked", text, blocked: true, reason: check.reason });
-      setInput("");
-      setAttached(null);
-      return;
-    }
-
-    const userMsg: Msg = { role: "user", text: text || "(без текста)", image: attached?.data };
-    setMessages((m) => [...m, userMsg]);
-    setInput("");
-    const currentAttached = attached;
-    setAttached(null);
-    setBusy(true);
-
-    const intent = detectIntent(text, !!currentAttached);
-    logAudit({ email: sessEmail, role: sessRole, intent: intent || "web", text });
-    consumeToken();
-
-    // ── МЕДИА-ВЕТКА ─────────────────────────────────────────────
-    if (intent === "image" || intent === "image-edit") {
-      const statusText = currentAttached ? "[Система] Обработка графических ресурсов..." : "[Система] Синтез изображения...";
-      setMessages((m) => [...m, { role: "ai", text: statusText, status: "loading", progress: 10 }]);
-      const tick = setInterval(() => {
-        setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(92, (last.progress || 10) + 7); return [...n]; });
-      }, 600);
-      try {
-        const url = await generateImage(text || "красивое фото", currentAttached ? { image: currentAttached.data } : undefined);
-        clearInterval(tick);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Изображение готово.", image: url, actions: ["📸 Графика синтезирована", "💾 Сохранено в ленту"] }; return n; });
-      } catch (e: unknown) {
-        clearInterval(tick);
-        const msg = e instanceof Error ? e.message : "Ошибка";
-        toast.error(msg);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    if (intent === "audio") {
-      setMessages((m) => [...m, { role: "ai", text: "[Система] Синтез аудио-дорожки...", status: "loading", progress: 8 }]);
-      const tick = setInterval(() => {
-        setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(90, (last.progress || 8) + 5); return [...n]; });
-      }, 800);
-      try {
-        const url = await generateAudio(text);
-        clearInterval(tick);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Аудио готово.", audio: url, actions: ["🎵 Дорожка собрана", "▶ Готово к воспроизведению"] }; return n; });
-      } catch (e: unknown) {
-        clearInterval(tick);
-        const msg = e instanceof Error ? e.message : "Ошибка";
-        toast.error(msg);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    if (intent === "video") {
-      setMessages((m) => [...m, { role: "ai", text: "[Система] Рендеринг видео-потока...", status: "loading", progress: 5 }]);
-      const tick = setInterval(() => {
-        setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(88, (last.progress || 5) + 4); return [...n]; });
-      }, 900);
-      try {
-        const url = await generateVideo(text);
-        clearInterval(tick);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Видео готово.", video: url, actions: ["🎬 Видео рендеринг завершён", "▶ Доступно для просмотра"] }; return n; });
-      } catch (e: unknown) {
-        clearInterval(tick);
-        const msg = e instanceof Error ? e.message : "Ошибка";
-        toast.error(msg);
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    // ── ВЕБ-ВЕТКА (HTML-сайт + опц. Supabase) ───────────────────
-    setMessages((m) => [...m, { role: "ai", text: "[Система] Генерация структуры проекта...", status: "loading", progress: 6 }]);
-    const tick = setInterval(() => {
-      setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(94, (last.progress || 6) + 6); return [...n]; });
-    }, 500);
-
-    const ctx = filesContextForAi(files);
-    const history: ChatMessage[] = [];
-    if (ctx) history.push({ role: "user", content: ctx });
-    const prior = messages.filter((_, i) => i > 0);
-    for (const m of prior) history.push({ role: m.role === "user" ? "user" : "assistant", content: m.text });
-    history.push({ role: "user", content: text });
-
-    try {
-      const reply = await chat(history);
-      clearInterval(tick);
-      const { actions, rest } = extractActions(reply);
-      const html = extractHtml(rest || reply);
-      if (html) {
-        const sb = getSettings().supabase;
-        let finalHtml = sb.url && sb.anonKey ? injectSupabase(html, sb.url, sb.anonKey) : html;
-        const leadScript = buildLeadInjector(getIntegrationsSnapshot());
-        if (leadScript) {
-          finalHtml = finalHtml.includes("</body>")
-            ? finalHtml.replace("</body>", `${leadScript}\n</body>`)
-            : finalHtml + leadScript;
-        }
-        setPreviewHtml(finalHtml);
-        const nextFiles = { ...files, "index.html": finalHtml };
-        setFilesState(nextFiles);
-        saveFiles(nextFiles);
-        const finalActions = actions.length ? actions : ["🔨 Структура собрана", "🎨 Стили применены", "🚀 Превью обновлено"];
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Сборка завершена.", actions: finalActions, progress: 100 }; return n; });
-      } else {
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: reply, actions }; return n; });
-      }
-    } catch (e: unknown) {
-      clearInterval(tick);
-      const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
-      toast.error(msg);
-      setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: `[Ошибка] ${msg}` }; return n; });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="max-w-7xl mx-auto px-4 md:px-6 pt-6 animate-fade-up">
-      <div className="grid lg:grid-cols-[40%_60%] gap-4 h-[calc(100vh-180px)]">
-        {/* CHAT LEFT */}
-        <div className="bg-card border border-border rounded-2xl flex flex-col overflow-hidden">
-          <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Icon name="Sparkles" size={14} className="text-purple-500" />
-              <h2 className="font-heading uppercase tracking-wider text-sm">Рабочее пространство</h2>
-            </div>
-            <button
-              onClick={() => setMessages([{ role: "ai", text: "Чат очищен. Опиши новый сайт." }])}
-              className="text-xs text-muted-foreground hover:text-foreground transition"
-              title="Очистить чат"
+              <Icon name="ShoppingBasket" size={16} />
+              Смотреть ассортимент
+            </a>
+            <a
+              href="#delivery"
+              className="flex items-center gap-2 px-6 py-3.5 rounded-full bg-card border border-border text-sm font-medium hover:border-fresh-olive transition"
             >
-              <Icon name="RotateCcw" size={14} />
-            </button>
+              <Icon name="Truck" size={16} />
+              Условия доставки
+            </a>
           </div>
 
-          <div className="flex-1 overflow-y-auto scrollbar-thin px-5 py-4 space-y-4">
-            {messages.map((m, i) => (
-              <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} animate-fade-up`}>
-                <div className={`max-w-[85%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
-                  m.role === "user"
-                    ? "bg-foreground text-background rounded-br-md"
-                    : "bg-secondary text-foreground rounded-bl-md border border-border"
-                }`}>
-                  {m.status === "loading" ? (
-                    <div className="space-y-2 min-w-[220px]">
-                      <div className="flex items-center gap-2.5">
-                        <AntTyping size={42} />
-                        <span className="font-mono text-xs">{m.text}<span className="animate-cursor">|</span></span>
-                      </div>
-                      <div className="h-1 rounded-full bg-background overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-purple-500 to-orange-500 transition-all duration-500" style={{ width: `${m.progress || 0}%` }} />
-                      </div>
-                      <div className="font-mono text-[10px] text-muted-foreground text-right">{m.progress || 0}%</div>
-                    </div>
-                  ) : (
-                    <>{m.text}</>
-                  )}
-                  {m.actions && m.actions.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {m.actions.map((a, k) => (
-                        <span key={k} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-background/60 border border-purple-500/30 text-purple-300">
-                          {a}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {m.image && (
-                    <div className="mt-2 rounded-lg overflow-hidden border border-border">
-                      <img src={m.image} alt="media" className="w-full max-h-80 object-contain bg-black/40" />
-                    </div>
-                  )}
-                  {m.video && (
-                    <div className="mt-2 rounded-lg overflow-hidden border border-border">
-                      <video src={m.video} controls className="w-full max-h-80 bg-black" />
-                    </div>
-                  )}
-                  {m.audio && (
-                    <div className="mt-2">
-                      <audio src={m.audio} controls className="w-full" />
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-            {busy && messages[messages.length - 1]?.status !== "loading" && (
-              <div className="flex justify-start animate-fade-up">
-                <div className="bg-secondary text-muted-foreground border border-border rounded-2xl rounded-bl-md px-4 py-3 text-sm flex items-center gap-3">
-                  <AntTyping size={48} />
-                  <div className="flex flex-col">
-                    <span className="font-heading text-xs uppercase tracking-wider text-foreground">Муравей печатает</span>
-                    <span className="text-[11px] font-mono text-muted-foreground">
-                      компилирует код<span className="animate-cursor">_</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="border-t border-border p-3">
-            {attached && (
-              <div className="mb-2 flex items-center gap-2 p-2 rounded-lg bg-secondary border border-purple-500/30 animate-fade-up">
-                <img src={attached.data} alt="вложение" className="w-12 h-12 rounded object-cover border border-border" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-medium truncate">{attached.name}</div>
-                  <div className="text-[10px] font-mono text-muted-foreground">фото для трансформации</div>
-                </div>
-                <button onClick={() => setAttached(null)} className="w-6 h-6 rounded hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition">
-                  <Icon name="X" size={12} />
-                </button>
-              </div>
-            )}
-            <input ref={photoRef} type="file" accept="image/*" className="hidden" onChange={onPickPhoto} />
-            <div className="bg-secondary border border-border rounded-xl p-2.5 focus-within:border-purple-500/50 transition-all">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder={attached ? "Что сделать с фото? Например: «на фоне гор»" : "Опишите сайт, изображение, видео или музыку..."}
-                rows={2}
-                className="w-full bg-transparent text-sm placeholder:text-muted-foreground resize-none focus:outline-none"
-                disabled={busy}
-              />
-              <div className="flex items-center justify-between mt-1.5">
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => photoRef.current?.click()}
-                    className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
-                      attached ? "bg-purple-500/20 text-purple-400" : "hover:bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                    title="Фото"
-                  >
-                    <Icon name="Camera" size={14} />
-                  </button>
-                  <button
-                    onClick={() => setInput((v) => (v ? v + " " : "") + "сгенерируй изображение ")}
-                    className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition"
-                    title="Картинка"
-                  >
-                    <Icon name="Image" size={14} />
-                  </button>
-                  <button
-                    onClick={() => setInput((v) => (v ? v + " " : "") + "создай музыку ")}
-                    className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition"
-                    title="Музыка"
-                  >
-                    <Icon name="Music" size={14} />
-                  </button>
-                  <button
-                    onClick={() => setInput((v) => (v ? v + " " : "") + "сгенерируй видео ")}
-                    className="w-7 h-7 rounded-lg hover:bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition"
-                    title="Видео"
-                  >
-                    <Icon name="Film" size={14} />
-                  </button>
-                </div>
-                <button
-                  onClick={send}
-                  disabled={busy || (!input.trim() && !attached)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-xs font-bold hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Icon name="Send" size={12} />
-                  За работу
-                </button>
-              </div>
-            </div>
+          <div className="mt-10 flex items-center gap-8 flex-wrap">
+            <Stat n="32" label="фермерских хозяйства" />
+            <Stat n="90′" label="средняя доставка" />
+            <Stat n="4.9" label="оценка в Яндексе" />
           </div>
         </div>
 
-        {/* PREVIEW RIGHT */}
-        <div className="bg-card border border-border rounded-2xl flex flex-col overflow-hidden">
-          <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 flex-1 min-w-0">
-              <div className="flex gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-red-500/40" />
-                <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/40" />
-                <span className="w-2.5 h-2.5 rounded-full bg-green-500/40" />
-              </div>
-              <div className="ml-3 flex-1 min-w-0 font-mono text-xs text-muted-foreground truncate">
-                muravey.app/проекты/{previewHtml ? "активный" : "новый"}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="flex p-0.5 rounded-lg bg-secondary border border-border">
-                <button onClick={() => setDevice("desktop")} className={`px-2 py-1 rounded-md transition ${device === "desktop" ? "bg-foreground text-background" : "text-muted-foreground"}`}>
-                  <Icon name="Monitor" size={13} />
-                </button>
-                <button onClick={() => setDevice("mobile")} className={`px-2 py-1 rounded-md transition ${device === "mobile" ? "bg-foreground text-background" : "text-muted-foreground"}`}>
-                  <Icon name="Smartphone" size={13} />
-                </button>
-              </div>
-              <button
-                onClick={() => {
-                  if (!previewHtml) return toast.error("Сайт пока пустой");
-                  const w = window.open();
-                  if (w) { w.document.write(previewHtml); w.document.close(); }
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-secondary border border-border text-xs font-medium hover:bg-foreground hover:text-background transition"
-              >
-                <Icon name="ExternalLink" size={12} />
-                Открыть сайт
-              </button>
-            </div>
+        <div className="relative animate-fade-up" style={{ animationDelay: "120ms" }}>
+          <div className="relative rounded-[2rem] overflow-hidden border border-border shadow-2xl shadow-fresh-olive/10 aspect-[4/5]">
+            <img src={HERO_IMG} alt="Свежие продукты" className="w-full h-full object-cover" />
           </div>
-
-          <div className="flex-1 bg-secondary/30 flex items-center justify-center p-4 overflow-hidden">
-            <div className={`bg-background border border-border rounded-xl h-full transition-all duration-500 ${
-              device === "mobile" ? "w-[380px] max-w-full" : "w-full"
-            } overflow-hidden relative`}>
-              {previewHtml ? (
-                <>
-                  <iframe
-                    title="превью"
-                    srcDoc={previewHtml}
-                    sandbox="allow-scripts allow-forms"
-                    className="w-full h-full border-0 bg-white"
-                  />
-                  {busy && (
-                    <div className="absolute inset-0 bg-background/85 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-up">
-                      <AntTyping size={140} />
-                      <div className="mt-6 text-center">
-                        <h3 className="font-heading text-2xl text-gradient mb-1">Муравей за работой</h3>
-                        <p className="text-sm font-mono text-muted-foreground">
-                          печатает код<span className="animate-cursor">|</span>
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </>
-              ) : busy ? (
-                <div className="w-full h-full flex flex-col items-center justify-center text-center p-8 relative">
-                  <div className="absolute inset-0 grid-bg opacity-40" />
-                  <div className="relative z-10">
-                    <AntTyping size={160} />
-                    <h3 className="font-heading text-3xl text-gradient mt-6 mb-1">Муравей за работой</h3>
-                    <p className="text-sm font-mono text-muted-foreground">
-                      печатает ваш сайт<span className="animate-cursor">|</span>
-                    </p>
-                  </div>
-                </div>
-              ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center text-center p-8 relative">
-                  <div className="absolute inset-0 grid-bg opacity-40" />
-                  <div className="relative z-10 max-w-md">
-                    <div className="mb-4 flex justify-center"><AntTyping size={110} /></div>
-                    <h3 className="font-heading text-3xl mb-2 text-gradient">Готов к работе</h3>
-                    <p className="text-sm text-muted-foreground mb-6">
-                      Напишите запрос в чат слева. Ваш сайт появится здесь в реальном времени.
-                    </p>
-                    <div className="flex flex-wrap gap-2 justify-center">
-                      {["Лендинг", "Магазин", "Портфолио", "Блог"].map((s) => (
-                        <button
-                          key={s}
-                          onClick={() => setInput(`Сделай красивый ${s.toLowerCase()} с современным дизайном`)}
-                          className="px-3 py-1.5 rounded-full bg-secondary border border-border text-xs hover:border-purple-500/50 hover:text-foreground text-muted-foreground transition"
-                        >
-                          {s}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
+          <div className="absolute -bottom-5 -left-5 hidden md:block bg-card border border-border rounded-2xl p-4 shadow-xl max-w-[230px]">
+            <div className="flex items-center gap-2 mb-1.5">
+              <Icon name="Sprout" size={14} className="text-fresh-olive" />
+              <div className="text-xs font-medium">Сегодня в наличии</div>
             </div>
+            <div className="text-2xl font-heading">137 позиций</div>
+            <div className="text-[11px] text-muted-foreground mt-1">обновлено в 06:30</div>
+          </div>
+          <div className="absolute -top-4 -right-4 hidden md:flex w-24 h-24 rounded-full bg-fresh-terra/90 text-white items-center justify-center text-center text-xs font-medium leading-tight rotate-[-12deg]">
+            доставка<br />бесплатно<br />от 1500₽
           </div>
         </div>
       </div>
+
+      {/* decorative leaves */}
+      <Icon name="Leaf" size={120} className="absolute top-10 right-0 text-fresh-leaf/15 -rotate-45 hidden lg:block" />
+      <Icon name="Apple" size={90} className="absolute bottom-10 left-5 text-fresh-terra/10 hidden lg:block" />
+    </section>
+  );
+}
+
+function Stat({ n, label }: { n: string; label: string }) {
+  return (
+    <div>
+      <div className="font-heading text-3xl text-fresh-ink">{n}</div>
+      <div className="text-xs text-muted-foreground uppercase tracking-wider">{label}</div>
     </div>
   );
 }
 
-// ─── Core Tab ─────────────────────────────────────────────────────────────────
-function CoreTab() {
-  const { isOwner } = useAuth();
-  const [sub, setSub] = useState<CoreTab>(isOwner ? "ai" : "logs");
-
-  const { pendingCount, totalUnread } = useSupport();
-  const subTabs: { id: CoreTab; label: string; icon: string; owner?: boolean; badge?: number }[] = [
-    { id: "ai", label: "Движок", icon: "Brain", owner: true },
-    { id: "github", label: "GitHub", icon: "Github" },
-    { id: "payments", label: "Платежи", icon: "CreditCard", owner: true },
-    { id: "system", label: "Система", icon: "Settings", owner: true },
-    { id: "logs", label: "Логи", icon: "ScrollText" },
-    { id: "users", label: "Пользователи", icon: "Users", owner: true },
-    { id: "dialogs", label: "Диалоги", icon: "MessagesSquare", badge: totalUnread || pendingCount },
-    { id: "integrations", label: "Интеграции", icon: "Plug", owner: true },
-  ].filter((t) => !t.owner || isOwner);
-
+// ─── Categories ─────────────────────────────────────────────────────────────
+function Categories() {
   return (
-    <div className="max-w-5xl mx-auto px-4 md:px-6 pt-6 animate-fade-up">
-      <div className="mb-6">
-        <div className="font-mono text-xs text-muted-foreground mb-1">/ админ / мозг</div>
-        <h1 className="font-heading text-4xl">Панель мозга</h1>
-        <p className="text-muted-foreground text-sm mt-1">Настройки движка, интеграций и системы</p>
-      </div>
+    <section id="categories" className="bg-fresh-beige/40 border-y border-border">
+      <div className="max-w-6xl mx-auto px-5 md:px-8 py-16 md:py-24">
+        <SectionTitle eyebrow="Ассортимент" title="Шесть категорий, всё своё" />
 
-      <div className="flex gap-1 p-1 bg-card border border-border rounded-xl mb-6 overflow-x-auto scrollbar-hide">
-        {subTabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setSub(t.id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${
-              sub === t.id ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-            }`}
-          >
-            <Icon name={t.icon} fallback="Circle" size={14} />
-            <span className="font-heading uppercase tracking-wider text-xs">{t.label}</span>
-            {t.badge ? (
-              <span className="min-w-[16px] h-[16px] px-1 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{t.badge}</span>
-            ) : null}
-          </button>
-        ))}
-      </div>
-
-      {sub === "ai" && isOwner && <AIPanel />}
-      {sub === "github" && <GitHubPanel />}
-      {sub === "payments" && isOwner && <PaymentsPanel />}
-      {sub === "system" && isOwner && <SystemPanel />}
-      {sub === "logs" && <LogsPanel />}
-      {sub === "users" && isOwner && <UsersPanel />}
-      {sub === "dialogs" && <DialogsPanel />}
-      {sub === "integrations" && isOwner && <IntegrationsPanel />}
-    </div>
-  );
-}
-
-function AIPanel() {
-  const [s, set] = useSettings();
-  const providers: Settings["ai"]["provider"][] = ["DeepSeek", "Claude", "OpenAI"];
-  const modelsByProvider: Record<Settings["ai"]["provider"], string[]> = {
-    DeepSeek: ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"],
-    Claude: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"],
-    OpenAI: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-  };
-  const baseByProvider: Record<Settings["ai"]["provider"], string> = {
-    DeepSeek: "https://api.deepseek.com/v1",
-    Claude: "https://api.anthropic.com/v1",
-    OpenAI: "https://api.openai.com/v1",
-  };
-
-  function pickProvider(p: Settings["ai"]["provider"]) {
-    set((cur) => ({
-      ...cur,
-      ai: { ...cur.ai, provider: p, model: modelsByProvider[p][0], baseUrl: baseByProvider[p] },
-    }));
-  }
-
-  async function testConnection() {
-    try {
-      toast.loading("Проверяем подключение...", { id: "test" });
-      await chat([{ role: "user", content: "Скажи коротко: «Подключение работает»." }]);
-      toast.success("Подключение работает", { id: "test" });
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Не удалось", { id: "test" });
-    }
-  }
-
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <Card title="Провайдер и модель" accent="purple">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Провайдер">
-            <div className="flex gap-1.5">
-              {providers.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => pickProvider(p)}
-                  className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition ${
-                    s.ai.provider === p ? "bg-purple-500/10 border-purple-500/50 text-purple-400" : "bg-secondary border-border text-muted-foreground hover:text-foreground"
-                  }`}
-                >{p}</button>
-              ))}
-            </div>
-          </Field>
-          <Field label="Модель">
-            <select
-              value={s.ai.model}
-              onChange={(e) => set((c) => ({ ...c, ai: { ...c.ai, model: e.target.value } }))}
-              className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:border-purple-500/50 focus:outline-none"
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 md:gap-5">
+          {CATEGORIES.map((c, i) => (
+            <div
+              key={c.name}
+              className="group bg-card rounded-2xl p-5 md:p-6 border border-border hover:border-fresh-olive transition-all animate-fade-up cursor-pointer"
+              style={{ animationDelay: `${i * 50}ms` }}
             >
-              {modelsByProvider[s.ai.provider].map((m) => <option key={m}>{m}</option>)}
-            </select>
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="Доступы к API" accent="orange">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="API-ключ">
-            <Input value={s.ai.apiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, apiKey: v } }))} placeholder="sk-..." type="password" mono />
-          </Field>
-          <Field label="Базовый URL">
-            <Input value={s.ai.baseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, baseUrl: v } }))} placeholder="https://api.deepseek.com/v1" mono />
-          </Field>
-          <Field label="Прокси URL" hint="Если задан — используется вместо базового">
-            <Input value={s.ai.proxyUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, proxyUrl: v } }))} placeholder="https://proxy.muravey.app" mono />
-          </Field>
-          <Field label="Температура">
-            <Input value={s.ai.temperature} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, temperature: v } }))} placeholder="0.7" mono />
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="Image API · Генерация фото" accent="purple" badge="Flux / SD / DALL·E">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Image API Key">
-            <Input value={s.ai.imageApiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageApiKey: v } }))} placeholder="r8_..." type="password" mono />
-          </Field>
-          <Field label="Базовый URL" hint="Replicate / OpenAI / свой шлюз">
-            <Input value={s.ai.imageBaseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageBaseUrl: v } }))} placeholder="https://api.replicate.com/v1" mono />
-          </Field>
-          <Field label="Модель">
-            <Input value={s.ai.imageModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageModel: v } }))} placeholder="black-forest-labs/flux-schnell" mono />
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="Video / Audio API · Музыка и видео" accent="orange" badge="Suno / Luma / Runway">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Video/Audio API Key">
-            <Input value={s.ai.mediaApiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, mediaApiKey: v } }))} placeholder="r8_..." type="password" mono />
-          </Field>
-          <Field label="Базовый URL">
-            <Input value={s.ai.mediaBaseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, mediaBaseUrl: v } }))} placeholder="https://api.replicate.com/v1" mono />
-          </Field>
-          <Field label="Модель видео">
-            <Input value={s.ai.videoModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, videoModel: v } }))} placeholder="luma/ray-flash-2" mono />
-          </Field>
-          <Field label="Модель аудио">
-            <Input value={s.ai.audioModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, audioModel: v } }))} placeholder="suno/bark" mono />
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="Системный промпт" accent="purple">
-        <textarea
-          rows={8}
-          value={s.ai.systemPrompt}
-          onChange={(e) => set((c) => ({ ...c, ai: { ...c.ai, systemPrompt: e.target.value } }))}
-          className="w-full bg-secondary border border-border rounded-lg px-4 py-3 text-sm font-mono leading-relaxed focus:border-purple-500/50 focus:outline-none resize-none"
-        />
-      </Card>
-
-      <div className="flex justify-end gap-2">
-        <button onClick={testConnection} className="px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition">Проверить подключение</button>
-        <button onClick={() => toast.success("Настройки сохранены")} className="px-5 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">Сохранить настройки</button>
-      </div>
-    </div>
-  );
-}
-
-function GitHubPanel() {
-  const [s, set] = useSettings();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-
-  async function onZipUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      toast.loading("Распаковываем архив...", { id: "zip" });
-      const files = await importZip(file);
-      const count = Object.keys(files).length;
-      toast.success(`Загружено файлов: ${count}. Превью обновлено.`, { id: "zip" });
-      window.dispatchEvent(new Event("muravey:project-updated"));
-    } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Ошибка распаковки", { id: "zip" });
-    } finally {
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  }
-
-  async function onZipDownload() {
-    const files = loadFiles();
-    if (Object.keys(files).length === 0) {
-      toast.error("Проект пуст. Сгенерируйте сайт в чате.");
-      return;
-    }
-    await exportZip(files);
-    toast.success("Архив скачан");
-  }
-
-  async function onCommit() {
-    const files = loadFiles();
-    if (Object.keys(files).length === 0) return toast.error("Проект пуст");
-    setBusy(true);
-    try {
-      toast.loading("Отправляем в GitHub...", { id: "gh" });
-      const sha = await commitToGitHub(files);
-      toast.success(`Коммит создан: ${sha.slice(0, 7)}`, { id: "gh" });
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Ошибка коммита", { id: "gh" });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onCheck() {
-    try {
-      toast.loading("Проверяем токен...", { id: "ghc" });
-      const u = await pingGitHub();
-      toast.success(`Подключено: @${u.login}`, { id: "ghc" });
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Не удалось", { id: "ghc" });
-    }
-  }
-
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <Card title="Репозиторий" accent="purple">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Токен GitHub">
-            <Input value={s.github.token} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, token: v } }))} placeholder="ghp_..." type="password" mono />
-          </Field>
-          <Field label="Путь к репозиторию">
-            <Input value={s.github.repo} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, repo: v } }))} placeholder="пользователь/репо" mono />
-          </Field>
-          <Field label="Адрес сайта">
-            <Input value={s.github.siteUrl} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, siteUrl: v } }))} placeholder="https://мой-сайт.ru" mono />
-          </Field>
-          <Field label="Ветка">
-            <Input value={s.github.branch} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, branch: v } }))} placeholder="main" mono />
-          </Field>
-          <Field label="CORS-прокси (необязательно)" hint="Свой прокси, проксирующий api.github.com. Пусто = прямой запрос + автофолбэк">
-            <Input value={s.github.proxy} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, proxy: v } }))} placeholder="https://corsproxy.io/?" mono />
-          </Field>
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            onClick={onCheck}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition"
-          >
-            <Icon name="Stethoscope" size={14} />
-            Проверить токен
-          </button>
-          <button
-            onClick={onCommit}
-            disabled={busy}
-            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition disabled:opacity-50"
-          >
-            <Icon name="GitCommit" size={14} />
-            В GitHub
-          </button>
-        </div>
-      </Card>
-
-      <Card title="ZIP-движок" accent="orange" badge="Только админ">
-        <p className="text-xs text-muted-foreground mb-4">Импорт и экспорт проекта одним архивом. Файлы распаковываются в память браузера и попадают в контекст ИИ.</p>
-        <input ref={fileRef} type="file" accept=".zip" className="hidden" onChange={onZipUpload} />
-        <div className="grid md:grid-cols-2 gap-3">
-          <button onClick={() => fileRef.current?.click()} className="group flex items-center gap-3 p-4 rounded-xl border border-dashed border-border hover:border-orange-500/50 hover:bg-orange-500/5 transition text-left">
-            <div className="w-10 h-10 rounded-lg bg-orange-500/10 border border-orange-500/20 flex items-center justify-center group-hover:scale-105 transition">
-              <Icon name="Upload" size={16} className="text-orange-500" />
-            </div>
-            <div className="flex-1">
-              <div className="font-medium text-sm">Загрузить .zip</div>
-              <div className="text-xs text-muted-foreground font-mono">→ распаковать в контекст ИИ</div>
-            </div>
-          </button>
-          <button onClick={onZipDownload} className="group flex items-center gap-3 p-4 rounded-xl border border-dashed border-border hover:border-purple-500/50 hover:bg-purple-500/5 transition text-left">
-            <div className="w-10 h-10 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center group-hover:scale-105 transition">
-              <Icon name="Download" size={16} className="text-purple-500" />
-            </div>
-            <div className="flex-1">
-              <div className="font-medium text-sm">Скачать .zip</div>
-              <div className="text-xs text-muted-foreground font-mono">→ выгрузить текущую сборку</div>
-            </div>
-          </button>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function PaymentsPanel() {
-  const [s, set] = useSettings();
-
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <Card title="Интеграция Т-Банк" accent="orange">
-        <div className="flex items-center gap-3 mb-4 p-3 rounded-lg bg-orange-500/5 border border-orange-500/20">
-          <div className="w-9 h-9 rounded-lg bg-orange-500 flex items-center justify-center text-black font-bold">Т</div>
-          <div>
-            <div className="font-medium text-sm">Т-Банк Бизнес</div>
-            <div className="text-xs text-muted-foreground">Эквайринг и СБП</div>
-          </div>
-          <span className={`ml-auto text-xs px-2 py-0.5 rounded-full border ${
-            s.payments.terminalKey ? "bg-green-500/10 text-green-400 border-green-500/20" : "bg-muted text-muted-foreground border-border"
-          }`}>{s.payments.terminalKey ? "Активно" : "Не настроено"}</span>
-        </div>
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Ключ терминала">
-            <Input value={s.payments.terminalKey} onChange={(v) => set((c) => ({ ...c, payments: { ...c.payments, terminalKey: v } }))} placeholder="1234567890DEMO" mono />
-          </Field>
-          <Field label="Пароль">
-            <Input value={s.payments.password} onChange={(v) => set((c) => ({ ...c, payments: { ...c.payments, password: v } }))} placeholder="••••••••••" type="password" mono />
-          </Field>
-        </div>
-        <div className="mt-4 flex justify-end">
-          <button onClick={() => toast.success("Данные платёжной системы сохранены")} className="px-4 py-2 rounded-lg bg-foreground text-background text-sm font-medium hover:opacity-90 transition">
-            Сохранить
-          </button>
-        </div>
-      </Card>
-
-      <Card title="СБП — Быстрые платежи" accent="purple">
-        <div className="grid md:grid-cols-[200px_1fr] gap-6 items-start">
-          <div className="aspect-square rounded-xl border border-border bg-secondary p-4 flex items-center justify-center">
-            <div className="grid grid-cols-8 gap-0.5 w-full h-full">
-              {Array.from({ length: 64 }).map((_, i) => (
-                <div key={i} className={`rounded-[1px] ${(i * 37) % 5 < 3 ? "bg-foreground" : "bg-transparent"}`} />
-              ))}
-            </div>
-          </div>
-          <div className="space-y-3">
-            <div>
-              <div className="text-xs text-muted-foreground font-mono mb-1">QR · Пополнение токенов</div>
-              <div className="font-heading text-3xl">990 ₽ → 5 000 токенов</div>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => { set((c) => ({ ...c, tokens: c.tokens + 5000 })); toast.success("Зачислено 5 000 токенов"); }}
-                className="px-3 py-2 rounded-lg bg-secondary border border-border text-xs hover:bg-foreground hover:text-background transition"
-              >Симулировать оплату</button>
-              <button
-                onClick={() => { navigator.clipboard.writeText("https://qr.nspk.ru/demo-muravey"); toast.success("Ссылка скопирована"); }}
-                className="px-3 py-2 rounded-lg bg-secondary border border-border text-xs hover:bg-foreground hover:text-background transition"
-              >Копировать ссылку</button>
-            </div>
-          </div>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function SystemPanel() {
-  const [s, set] = useSettings();
-  const [sql, setSql] = useState("");
-  const [appKeyName, setAppKeyName] = useState("");
-  const [appKeyVal, setAppKeyVal] = useState("");
-
-  async function onPingSupabase() {
-    try {
-      toast.loading("Проверяем Supabase...", { id: "sb" });
-      await pingSupabase();
-      toast.success("Supabase подключён", { id: "sb" });
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Ошибка", { id: "sb" });
-    }
-  }
-
-  async function onApplySql() {
-    if (!sql.trim()) return toast.error("Введите SQL");
-    try {
-      toast.loading("[Система] Применение SQL...", { id: "sql" });
-      await applySql(sql);
-      toast.success("Схема применена", { id: "sql" });
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Ошибка", { id: "sql" });
-    }
-  }
-
-  function addAppKey() {
-    if (!appKeyName.trim()) return toast.error("Укажите имя ключа");
-    set((c) => ({ ...c, appKeys: { ...c.appKeys, [appKeyName.trim()]: appKeyVal } }));
-    setAppKeyName(""); setAppKeyVal("");
-    toast.success("Ключ приложения сохранён");
-  }
-
-  function removeAppKey(k: string) {
-    set((c) => {
-      const next = { ...c.appKeys };
-      delete next[k];
-      return { ...c, appKeys: next };
-    });
-  }
-
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <Card title="Supabase · БД и Авторизация" accent="purple" badge="Бэкенд">
-        <div className="flex items-center gap-3 mb-4 p-3 rounded-lg bg-purple-500/5 border border-purple-500/20">
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-black font-bold">S</div>
-          <div className="flex-1">
-            <div className="font-medium text-sm">Supabase Backend</div>
-            <div className="text-xs text-muted-foreground">PostgreSQL · Auth · Storage · RLS</div>
-          </div>
-          <span className={`text-xs px-2 py-0.5 rounded-full border ${
-            s.supabase.url && s.supabase.anonKey ? "bg-green-500/10 text-green-400 border-green-500/20" : "bg-muted text-muted-foreground border-border"
-          }`}>{s.supabase.url && s.supabase.anonKey ? "Подключено" : "Не настроено"}</span>
-        </div>
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="SUPABASE_URL">
-            <Input value={s.supabase.url} onChange={(v) => set((c) => ({ ...c, supabase: { ...c.supabase, url: v } }))} placeholder="https://xxxxx.supabase.co" mono />
-          </Field>
-          <Field label="SUPABASE_ANON_KEY">
-            <Input value={s.supabase.anonKey} onChange={(v) => set((c) => ({ ...c, supabase: { ...c.supabase, anonKey: v } }))} placeholder="eyJhbGciOi..." type="password" mono />
-          </Field>
-          <Field label="SUPABASE_SERVICE_KEY (опц.)" hint="Только для применения SQL из админки">
-            <Input value={s.supabase.serviceKey} onChange={(v) => set((c) => ({ ...c, supabase: { ...c.supabase, serviceKey: v } }))} placeholder="service_role..." type="password" mono />
-          </Field>
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <button onClick={onPingSupabase} className="px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition">
-            Проверить подключение
-          </button>
-        </div>
-      </Card>
-
-      <Card title="SQL · Автогенерация схем" accent="orange">
-        <p className="text-xs text-muted-foreground mb-3">
-          Попросите в чате «создай таблицу пользователей с авторизацией» — ИИ выдаст SQL. Вставьте его сюда и примените одним кликом.
-        </p>
-        <textarea
-          rows={6}
-          value={sql}
-          onChange={(e) => setSql(e.target.value)}
-          placeholder={`-- Пример\nCREATE TABLE profiles (\n  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  user_id uuid REFERENCES auth.users,\n  display_name text\n);\nALTER TABLE profiles ENABLE ROW LEVEL SECURITY;`}
-          className="w-full bg-secondary border border-border rounded-lg px-4 py-3 text-xs font-mono leading-relaxed focus:border-orange-500/50 focus:outline-none resize-none"
-        />
-        <div className="mt-3 flex justify-end">
-          <button onClick={onApplySql} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">
-            <Icon name="Database" size={14} />
-            Применить SQL
-          </button>
-        </div>
-      </Card>
-
-      <Card title="Ключи приложений · Sandbox" accent="purple" badge="Изолированы">
-        <p className="text-xs text-muted-foreground mb-3">
-          Генерируемые приложения хранят свои собственные API-ключи отдельно от мастер-ключей платформы. Доступ только через <code className="font-mono text-purple-400">window.__APP_KEYS__</code>.
-        </p>
-        <div className="space-y-2 mb-3">
-          {Object.entries(s.appKeys).length === 0 && (
-            <div className="text-xs text-muted-foreground italic">Пока нет ключей приложений</div>
-          )}
-          {Object.entries(s.appKeys).map(([k, v]) => (
-            <div key={k} className="flex items-center gap-2 p-2 rounded-lg bg-secondary border border-border">
-              <span className="font-mono text-xs text-purple-400">{k}</span>
-              <span className="flex-1 font-mono text-xs text-muted-foreground truncate">{v.replace(/./g, "•").slice(0, 24)}</span>
-              <button onClick={() => removeAppKey(k)} className="w-6 h-6 rounded hover:bg-background flex items-center justify-center text-muted-foreground hover:text-red-400 transition">
-                <Icon name="X" size={12} />
-              </button>
+              <div className={`w-12 h-12 rounded-full ${c.color} flex items-center justify-center mb-4 group-hover:scale-110 transition-transform`}>
+                <Icon name={c.icon} fallback="Leaf" size={20} />
+              </div>
+              <div className="font-heading text-xl md:text-2xl text-fresh-ink mb-1">{c.name}</div>
+              <div className="text-sm text-muted-foreground">{c.desc}</div>
             </div>
           ))}
         </div>
-        <div className="grid md:grid-cols-[1fr_2fr_auto] gap-2">
-          <Input value={appKeyName} onChange={setAppKeyName} placeholder="STRIPE_KEY" mono />
-          <Input value={appKeyVal} onChange={setAppKeyVal} placeholder="sk_test_..." type="password" mono />
-          <button onClick={addAppKey} className="px-4 py-2 rounded-lg bg-foreground text-background text-sm font-medium hover:opacity-90 transition">
-            Добавить
-          </button>
-        </div>
-      </Card>
-
-      <AccessControlCard />
-
-      <Card title="Переключатели" accent="purple">
-        <div className="space-y-3">
-          <Toggle
-            label="Режим самообновления"
-            hint="Платформа может редактировать саму себя"
-            on={s.system.selfEdit}
-            setOn={(v) => set((c) => ({ ...c, system: { ...c.system, selfEdit: v } }))}
-            color="purple"
-          />
-          <Toggle
-            label="Открытый доступ к ИИ"
-            hint="Публичный доступ к API ассистента"
-            on={s.system.publicAi}
-            setOn={(v) => set((c) => ({ ...c, system: { ...c.system, publicAi: v } }))}
-            color="orange"
-          />
-        </div>
-      </Card>
-
-      <Card title="Опасная зона" accent="orange">
-        <div className="flex items-center justify-between gap-4 p-3 rounded-lg border border-red-500/20 bg-red-500/5">
-          <div>
-            <div className="font-medium text-sm">Сброс баланса</div>
-            <div className="text-xs text-muted-foreground">Сбросить счётчик токенов до 0</div>
-          </div>
-          <button
-            onClick={() => { set((c) => ({ ...c, tokens: 0 })); toast.success("Баланс обнулён"); }}
-            className="px-4 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-medium hover:bg-red-500/20 transition"
-          >Сбросить</button>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-// ─── Access Control / Owners / Moderators ────────────────────────────────────
-function AccessControlCard() {
-  const { ownerEmail, moderators } = useAuth();
-  const [newMod, setNewMod] = useState("");
-  const [newOwner, setNewOwner] = useState("");
-  const envOwner = (import.meta.env.VITE_ADMIN_EMAIL || import.meta.env.NEXT_PUBLIC_ADMIN_EMAIL || "") as string;
-
-  return (
-    <Card title="Доступ и роли" accent="orange" badge="Owner-only">
-      <div className="grid md:grid-cols-2 gap-5">
-        <div>
-          <div className="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mb-2">Владелец (Superadmin)</div>
-          <div className="flex items-center gap-2 p-3 rounded-lg bg-orange-500/5 border border-orange-500/20">
-            <Icon name="Crown" size={14} className="text-orange-400" />
-            <span className="font-mono text-sm truncate flex-1">{ownerEmail || "не задан"}</span>
-          </div>
-          <div className="text-[10px] font-mono text-muted-foreground mt-2 leading-relaxed">
-            {envOwner
-              ? <>Источник: ENV <code className="text-purple-400">VITE_ADMIN_EMAIL</code></>
-              : <>Первый зарегистрированный аккаунт. Можно задать через ENV <code className="text-purple-400">VITE_ADMIN_EMAIL</code> в Vercel.</>}
-          </div>
-
-          <div className="mt-4">
-            <div className="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mb-2">Передать права владельца</div>
-            <div className="flex gap-2">
-              <input
-                value={newOwner}
-                onChange={(e) => setNewOwner(e.target.value)}
-                placeholder="email нового владельца"
-                className="flex-1 bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:border-orange-500/50 focus:outline-none"
-              />
-              <button
-                onClick={() => {
-                  if (!confirm("Передать права владельца? Текущий аккаунт станет обычным пользователем.")) return;
-                  try { transferOwnership(newOwner); setNewOwner(""); toast.success("Права переданы"); }
-                  catch (e: unknown) { toast.error(e instanceof Error ? e.message : "Ошибка"); }
-                }}
-                className="px-3 py-2 rounded-lg bg-orange-500/10 border border-orange-500/30 text-orange-400 text-xs font-medium hover:bg-orange-500/20 transition"
-              >
-                Передать
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div>
-          <div className="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mb-2">Список администраторов (Moderator)</div>
-          <div className="space-y-1.5 mb-3 max-h-44 overflow-y-auto scrollbar-thin">
-            {moderators.length === 0 && <div className="text-xs text-muted-foreground italic px-1">Пока пусто</div>}
-            {moderators.map((m) => (
-              <div key={m} className="flex items-center gap-2 p-2 rounded-lg bg-secondary border border-border">
-                <Icon name="Shield" size={12} className="text-purple-400" />
-                <span className="font-mono text-xs truncate flex-1">{m}</span>
-                <button
-                  onClick={() => { removeModerator(m); toast.success("Удалён"); }}
-                  className="w-6 h-6 rounded hover:bg-background flex items-center justify-center text-muted-foreground hover:text-red-400 transition"
-                >
-                  <Icon name="X" size={11} />
-                </button>
-              </div>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              value={newMod}
-              onChange={(e) => setNewMod(e.target.value)}
-              placeholder="email помощника"
-              className="flex-1 bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:border-purple-500/50 focus:outline-none"
-            />
-            <button
-              onClick={() => {
-                try { addModerator(newMod); setNewMod(""); toast.success("Добавлен"); }
-                catch (e: unknown) { toast.error(e instanceof Error ? e.message : "Ошибка"); }
-              }}
-              className="px-3 py-2 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-400 text-xs font-medium hover:bg-purple-500/20 transition"
-            >
-              Добавить
-            </button>
-          </div>
-        </div>
       </div>
-    </Card>
+    </section>
   );
 }
 
-// ─── Logs Panel ──────────────────────────────────────────────────────────────
-function LogsPanel() {
-  const { auditLog } = useAuth();
+// ─── About ──────────────────────────────────────────────────────────────────
+function About() {
   return (
-    <div className="space-y-4 animate-fade-up">
-      <Card title="Аудит запросов" accent="purple" badge={`${auditLog.length} записей`}>
-        <div className="flex justify-end mb-3">
-          <button
-            onClick={() => { if (confirm("Очистить все логи?")) { clearAudit(); toast.success("Логи очищены"); } }}
-            className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-secondary transition"
-          >
-            Очистить
-          </button>
+    <section id="about" className="py-16 md:py-24">
+      <div className="max-w-6xl mx-auto px-5 md:px-8 grid lg:grid-cols-2 gap-10 lg:gap-16 items-center">
+        <div className="relative order-2 lg:order-1 animate-fade-up">
+          <div className="rounded-[2rem] overflow-hidden border border-border aspect-[4/3]">
+            <img src={STORE_IMG} alt="Интерьер магазина" className="w-full h-full object-cover" />
+          </div>
+          <div className="absolute -bottom-5 right-5 bg-fresh-olive text-fresh-cream rounded-2xl px-5 py-4 shadow-xl">
+            <div className="font-heading text-3xl leading-none">с 2019</div>
+            <div className="text-[10px] uppercase tracking-widest mt-1 opacity-80">кормим город</div>
+          </div>
         </div>
-        <div className="space-y-1.5 max-h-[60vh] overflow-y-auto scrollbar-thin">
-          {auditLog.length === 0 && <div className="text-xs text-muted-foreground italic p-3">Лог пуст</div>}
-          {auditLog.map((e, i) => (
-            <div key={i} className={`p-2.5 rounded-lg border text-xs font-mono flex items-start gap-3 ${
-              e.blocked ? "bg-red-500/5 border-red-500/20" : "bg-secondary border-border"
-            }`}>
-              <span className="text-[10px] text-muted-foreground whitespace-nowrap mt-0.5">
-                {new Date(e.ts).toLocaleString("ru-RU")}
-              </span>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase whitespace-nowrap ${
-                e.role === "superadmin" ? "bg-orange-500/10 text-orange-400" :
-                e.role === "moderator" ? "bg-purple-500/10 text-purple-400" :
-                "bg-muted text-muted-foreground"
-              }`}>{e.role}</span>
-              <span className="text-muted-foreground truncate min-w-0 flex-shrink-0 w-40">{e.email}</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-background text-purple-300 whitespace-nowrap">{e.intent}</span>
-              <span className={`flex-1 truncate ${e.blocked ? "text-red-400" : "text-foreground"}`}>
-                {e.blocked ? `🚫 ${e.reason} · ` : ""}{e.text}
-              </span>
-            </div>
-          ))}
-        </div>
-      </Card>
-    </div>
-  );
-}
 
-// ─── Users Panel ─────────────────────────────────────────────────────────────
-function UsersPanel() {
-  const { accounts } = useAuth();
-  const list = Object.values(accounts).sort((a, b) => b.createdAt - a.createdAt);
-  const [editTokens, setEditTokens] = useState<Record<string, string>>({});
+        <div className="order-1 lg:order-2">
+          <SectionTitle eyebrow="О нас" title={"Маленький магазин\nс большим вкусом"} align="left" />
+          <div className="space-y-4 text-base text-muted-foreground leading-relaxed">
+            <p>
+              «Фрэшь» — это семейный магазин на углу, куда соседи приходят за тёплым хлебом, спелыми яблоками и творогом, который ещё помнит коровник.
+            </p>
+            <p>
+              Мы работаем напрямую с 32 фермерскими хозяйствами Подмосковья и Калуги. Без посредников, без долгого хранения — продукты едут с поля прямо к нам ночью, а утром уже на полке.
+            </p>
+            <p>
+              Заходите познакомиться или заказывайте онлайн — привезём за 90 минут.
+            </p>
+          </div>
 
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <Card title="Пользователи" accent="orange" badge={`${list.length}`}>
-        <div className="space-y-2 max-h-[65vh] overflow-y-auto scrollbar-thin">
-          {list.length === 0 && <div className="text-xs text-muted-foreground italic p-3">Нет аккаунтов</div>}
-          {list.map((a) => (
-            <div key={a.id} className="p-3 rounded-lg bg-secondary border border-border">
-              <div className="flex items-center gap-3 flex-wrap">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-[10px] font-bold text-black">
-                  {a.email.slice(0, 2).toUpperCase()}
+          <div className="mt-8 grid grid-cols-2 gap-4">
+            {FEATURES.map((f) => (
+              <div key={f.title} className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-full bg-fresh-beige flex-shrink-0 flex items-center justify-center">
+                  <Icon name={f.icon} fallback="Check" size={16} className="text-fresh-olive" />
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono text-sm truncate">{a.email}</div>
-                  <div className="text-[10px] text-muted-foreground font-mono">{new Date(a.createdAt).toLocaleString("ru-RU")} · ID {a.id.slice(0, 8)}</div>
-                </div>
-                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full uppercase ${
-                  a.role === "superadmin" ? "bg-orange-500/10 text-orange-400 border border-orange-500/20" :
-                  a.role === "moderator" ? "bg-purple-500/10 text-purple-400 border border-purple-500/20" :
-                  "bg-muted text-muted-foreground border border-border"
-                }`}>{a.role}</span>
-                {a.banned && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20">BANNED</span>}
-              </div>
-              <div className="mt-3 flex items-center gap-2 flex-wrap">
-                <div className="flex items-center gap-1">
-                  <Icon name="Coins" size={12} className="text-orange-500" />
-                  <input
-                    type="number"
-                    value={editTokens[a.email] ?? a.tokens}
-                    onChange={(e) => setEditTokens((p) => ({ ...p, [a.email]: e.target.value }))}
-                    className="w-24 bg-background border border-border rounded px-2 py-1 text-xs font-mono"
-                  />
-                  <button
-                    onClick={() => {
-                      const v = parseInt(editTokens[a.email] ?? String(a.tokens), 10);
-                      if (Number.isFinite(v)) { setTokensFor(a.email, v); toast.success("Баланс обновлён"); }
-                    }}
-                    className="px-2 py-1 text-[10px] rounded border border-border hover:bg-background transition"
-                  >Применить</button>
-                </div>
-                <button
-                  onClick={() => { banUser(a.email, !a.banned); toast.success(a.banned ? "Разблокирован" : "Заблокирован"); }}
-                  className={`px-3 py-1 rounded text-[10px] font-mono uppercase tracking-wider transition ${
-                    a.banned
-                      ? "bg-green-500/10 text-green-400 border border-green-500/30"
-                      : "bg-red-500/10 text-red-400 border border-red-500/30"
-                  }`}
-                >
-                  {a.banned ? "Разблокировать" : "Заблокировать"}
-                </button>
-                <button
-                  onClick={() => {
-                    if (a.role === "superadmin") return toast.error("Сначала передайте права владельца");
-                    if (!confirm(`Удалить ${a.email}?`)) return;
-                    deleteUser(a.email);
-                    toast.success("Удалён");
-                  }}
-                  className="px-3 py-1 rounded text-[10px] font-mono uppercase tracking-wider bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition"
-                >
-                  Удалить
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-// ─── Dialogs Panel ───────────────────────────────────────────────────────────
-function DialogsPanel() {
-  const { threads } = useSupport();
-  const [activeEmail, setActiveEmail] = useState<string | null>(threads[0]?.email || null);
-  const [reply, setReply] = useState("");
-  const active = threads.find((t) => t.email === activeEmail) || threads[0] || null;
-
-  useEffect(() => {
-    if (active) markReadForAdmin(active.email);
-  }, [active?.email, active?.messages.length]);
-
-  function sendReply() {
-    if (!active || !reply.trim()) return;
-    addMessage(active.email, "admin", reply.trim());
-    setReply("");
-    toast.success("Ответ отправлен");
-  }
-
-  return (
-    <Card title="Диалоги поддержки" accent="orange" badge={`${threads.length}`}>
-      <div className="grid md:grid-cols-[260px_1fr] gap-4 min-h-[60vh]">
-        <div className="space-y-1.5 max-h-[65vh] overflow-y-auto scrollbar-thin">
-          {threads.length === 0 && <div className="text-xs text-muted-foreground italic p-2">Диалогов пока нет</div>}
-          {threads.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setActiveEmail(t.email)}
-              className={`w-full text-left p-2.5 rounded-lg border transition ${
-                activeEmail === t.email
-                  ? "bg-secondary border-purple-500/50"
-                  : "bg-card border-border hover:bg-secondary"
-              }`}
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <span className="font-mono text-xs truncate flex-1">{t.email}</span>
-                {t.unreadForAdmin > 0 && (
-                  <span className="min-w-[16px] h-[16px] px-1 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{t.unreadForAdmin}</span>
-                )}
-              </div>
-              <div className="flex items-center gap-1.5">
-                {t.escalated && !t.resolved && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 uppercase">Эскалация</span>}
-                {t.resolved && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 uppercase">Решён</span>}
-                <span className="text-[10px] font-mono text-muted-foreground">{new Date(t.updatedAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</span>
-              </div>
-            </button>
-          ))}
-        </div>
-
-        <div className="bg-secondary border border-border rounded-xl flex flex-col">
-          {!active ? (
-            <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground italic">Выберите диалог</div>
-          ) : (
-            <>
-              <div className="px-4 py-3 border-b border-border flex items-center justify-between">
                 <div>
-                  <div className="font-mono text-sm">{active.email}</div>
-                  <div className="text-[10px] text-muted-foreground font-mono">{active.messages.length} сообщений</div>
+                  <div className="font-medium text-sm">{f.title}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5">{f.desc}</div>
                 </div>
-                {!active.resolved && (
-                  <button
-                    onClick={() => { resolveThread(active.email); toast.success("Диалог закрыт"); }}
-                    className="px-3 py-1.5 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-xs hover:bg-green-500/20 transition"
-                  >
-                    Закрыть тикет
-                  </button>
-                )}
-              </div>
-
-              <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-3 max-h-[50vh]">
-                {active.messages.map((m) => (
-                  <div key={m.id} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
-                    <div className={`max-w-[80%] px-3 py-2 rounded-2xl text-xs leading-relaxed whitespace-pre-wrap ${
-                      m.role === "user"
-                        ? "bg-card text-foreground border border-border rounded-bl-sm"
-                        : m.role === "admin"
-                          ? "bg-orange-500/15 text-foreground border border-orange-500/30 rounded-br-sm"
-                          : "bg-purple-500/10 text-foreground border border-purple-500/20 rounded-br-sm"
-                    }`}>
-                      <div className="text-[9px] font-mono uppercase tracking-wider mb-0.5 opacity-60">
-                        {m.role === "user" ? "Пользователь" : m.role === "admin" ? "Оператор" : "ИИ"} · {new Date(m.ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
-                      </div>
-                      {m.text}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="p-2.5 border-t border-border">
-                <div className="flex gap-2">
-                  <input
-                    value={reply}
-                    onChange={(e) => setReply(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") sendReply(); }}
-                    placeholder="Вклиниться в диалог..."
-                    className="flex-1 bg-card border border-border rounded-lg px-3 py-2 text-xs focus:border-orange-500/50 focus:outline-none"
-                  />
-                  <button
-                    onClick={sendReply}
-                    disabled={!reply.trim()}
-                    className="px-3 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black hover:opacity-90 transition disabled:opacity-50"
-                  >
-                    <Icon name="Send" size={12} />
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-// ─── Integrations Panel ──────────────────────────────────────────────────────
-function IntegrationsPanel() {
-  const items = useIntegrations();
-  const [kind, setKind] = useState<IntegrationKind>("webhook");
-  const [name, setName] = useState("");
-  const [url, setUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-
-  function add() {
-    if (!url.trim() || !url.startsWith("http")) return toast.error("Введите корректный URL");
-    addIntegration({ kind, name: name.trim() || KIND_LABEL[kind], url: url.trim(), apiKey: apiKey.trim() || undefined, enabled: true });
-    setName(""); setUrl(""); setApiKey("");
-    toast.success("Интеграция добавлена");
-  }
-
-  async function ping(id: string) {
-    const i = items.find((x) => x.id === id);
-    if (!i) return;
-    try {
-      toast.loading("Отправляем тестовый лид...", { id: "ping" });
-      await pingIntegration(i);
-      toast.success("Лид доставлен", { id: "ping" });
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Ошибка", { id: "ping" });
-    }
-  }
-
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <Card title="Подключение CRM и Webhooks" accent="purple" badge="Лиды → CRM">
-        <p className="text-xs text-muted-foreground mb-4">
-          Формы на сгенерированном сайте автоматически отправляют данные во все активные интеграции. Поддерживаются Битрикс24, AmoCRM, 1С, Albato, Zapier и любой Webhook.
-        </p>
-
-        <div className="grid md:grid-cols-2 gap-3 mb-4">
-          <Field label="Тип системы">
-            <select
-              value={kind}
-              onChange={(e) => setKind(e.target.value as IntegrationKind)}
-              className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:border-purple-500/50 focus:outline-none"
-            >
-              {(Object.keys(KIND_LABEL) as IntegrationKind[]).map((k) => (
-                <option key={k} value={k}>{KIND_LABEL[k]}</option>
-              ))}
-            </select>
-            <div className="text-[10px] text-muted-foreground mt-1 font-mono">{KIND_HINT[kind]}</div>
-          </Field>
-          <Field label="Название">
-            <Input value={name} onChange={setName} placeholder={KIND_LABEL[kind]} />
-          </Field>
-          <Field label="Webhook URL / API endpoint">
-            <Input value={url} onChange={setUrl} placeholder="https://hook.com/abc123" mono />
-          </Field>
-          <Field label="API-ключ (опц.)">
-            <Input value={apiKey} onChange={setApiKey} placeholder="опционально" type="password" mono />
-          </Field>
-        </div>
-        <div className="flex justify-end">
-          <button onClick={add} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">
-            <Icon name="Plus" size={14} />
-            Добавить
-          </button>
-        </div>
-      </Card>
-
-      <Card title="Активные интеграции" accent="orange" badge={`${items.filter((i) => i.enabled).length}/${items.length}`}>
-        {items.length === 0 ? (
-          <div className="text-xs text-muted-foreground italic p-3">Пока нет подключений</div>
-        ) : (
-          <div className="space-y-2">
-            {items.map((i) => (
-              <div key={i.id} className="p-3 rounded-lg bg-secondary border border-border">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <span className={`w-2 h-2 rounded-full ${i.enabled ? "bg-green-500 animate-pulse-dot" : "bg-muted-foreground"}`} />
-                  <span className="font-heading text-xs uppercase tracking-wider">{KIND_LABEL[i.kind]}</span>
-                  <span className="font-medium text-sm truncate flex-1">{i.name}</span>
-                  <button
-                    onClick={() => updateIntegration(i.id, { enabled: !i.enabled })}
-                    className="text-[10px] font-mono uppercase px-2 py-1 rounded border border-border hover:bg-card transition"
-                  >
-                    {i.enabled ? "Выключить" : "Включить"}
-                  </button>
-                  <button
-                    onClick={() => ping(i.id)}
-                    className="text-[10px] font-mono uppercase px-2 py-1 rounded bg-purple-500/10 border border-purple-500/30 text-purple-400 hover:bg-purple-500/20 transition"
-                  >
-                    Тест
-                  </button>
-                  <button
-                    onClick={() => removeIntegration(i.id)}
-                    className="w-6 h-6 rounded hover:bg-card flex items-center justify-center text-muted-foreground hover:text-red-400 transition"
-                  >
-                    <Icon name="X" size={12} />
-                  </button>
-                </div>
-                <div className="text-[10px] font-mono text-muted-foreground truncate mt-1.5">→ {i.url}</div>
               </div>
             ))}
           </div>
-        )}
-      </Card>
-    </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
-// ─── Projects Tab ─────────────────────────────────────────────────────────────
-function ProjectsTab({ onUse }: { onUse: (prompt: string) => void }) {
+// ─── Bestsellers ────────────────────────────────────────────────────────────
+function Bestsellers() {
   return (
-    <div className="max-w-7xl mx-auto px-4 md:px-6 pt-6 animate-fade-up">
-      <div className="flex items-end justify-between mb-8 flex-wrap gap-4">
-        <div>
-          <div className="font-mono text-xs text-muted-foreground mb-1">/ проекты / шаблоны</div>
-          <h1 className="font-heading text-4xl">Шаблоны</h1>
-          <p className="text-muted-foreground text-sm mt-1">Готовые шаблоны для быстрого старта</p>
-        </div>
-        <div className="flex gap-2">
-          <button className="flex items-center gap-2 px-4 py-2 rounded-lg bg-secondary border border-border text-sm hover:bg-foreground hover:text-background transition">
-            <Icon name="Filter" size={13} />
-            Фильтры
-          </button>
-          <button
-            onClick={() => onUse("")}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition"
-          >
-            <Icon name="Plus" size={13} />
-            Новый проект
-          </button>
+    <section className="bg-fresh-beige/30 border-y border-border py-16 md:py-24">
+      <div className="max-w-6xl mx-auto px-5 md:px-8">
+        <SectionTitle eyebrow="Хиты недели" title="Что чаще всего берут" />
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-5">
+          {PRODUCTS.map((p, i) => (
+            <div
+              key={p.name}
+              className="bg-card rounded-2xl border border-border p-5 hover:shadow-xl hover:-translate-y-1 transition-all animate-fade-up"
+              style={{ animationDelay: `${i * 60}ms` }}
+            >
+              <div className="aspect-square rounded-xl bg-fresh-beige/60 mb-4 flex items-center justify-center relative overflow-hidden">
+                <Icon name={["Cherry", "Apple", "Leaf", "Milk", "Wheat", "Fish"][i] || "Leaf"} fallback="Leaf" size={64} className="text-fresh-olive/60" />
+                {p.badge && (
+                  <span className="absolute top-3 left-3 text-[10px] uppercase tracking-wider px-2 py-1 rounded-full bg-fresh-terra text-white font-medium">
+                    {p.badge}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="font-heading text-lg leading-tight">{p.name}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5">{p.weight}</div>
+                </div>
+                <div className="text-right">
+                  <div className="font-heading text-xl text-fresh-ink">{p.price} ₽</div>
+                </div>
+              </div>
+              <button
+                onClick={() => toast.success(`«${p.name}» — оформите заказ по телефону`)}
+                className="w-full mt-4 py-2.5 rounded-full bg-fresh-beige hover:bg-fresh-olive hover:text-fresh-cream text-sm font-medium transition flex items-center justify-center gap-2"
+              >
+                <Icon name="Plus" size={14} />
+                В заказ
+              </button>
+            </div>
+          ))}
         </div>
       </div>
+    </section>
+  );
+}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {TEMPLATES.map((t, i) => (
-          <div
-            key={t.id}
-            className="group relative bg-card border border-border rounded-2xl overflow-hidden hover:border-foreground/30 transition-all animate-slide-up"
-            style={{ animationDelay: `${i * 60}ms` }}
-          >
-            <div className={`h-40 relative overflow-hidden ${
-              t.color === "purple" ? "bg-gradient-to-br from-purple-500/20 via-background to-background" : "bg-gradient-to-br from-orange-500/20 via-background to-background"
-            }`}>
-              <div className="absolute inset-0 grid-bg opacity-50" />
-              <div className="absolute inset-0 flex items-center justify-center text-7xl group-hover:scale-110 transition-transform duration-500">
-                {t.emoji}
-              </div>
-              <span className={`absolute top-3 left-3 text-[10px] px-2 py-1 rounded-full font-mono font-medium uppercase tracking-wider ${
-                t.color === "purple" ? "bg-purple-500/15 text-purple-400 border border-purple-500/30" : "bg-orange-500/15 text-orange-400 border border-orange-500/30"
-              }`}>
-                {t.tag}
-              </span>
+// ─── Delivery ───────────────────────────────────────────────────────────────
+function Delivery() {
+  const steps = [
+    { n: "01", title: "Звонок или сообщение", desc: "Скажите, что нужно — соберём с утра, как для себя" },
+    { n: "02", title: "Подтверждение", desc: "Уточним детали, сумму и удобное время" },
+    { n: "03", title: "Доставка 90 минут", desc: "Привезём бесплатно от 1500 ₽ по городу" },
+    { n: "04", title: "Не понравилось?", desc: "Вернём деньги или заменим без вопросов" },
+  ];
+  return (
+    <section id="delivery" className="py-16 md:py-24">
+      <div className="max-w-6xl mx-auto px-5 md:px-8">
+        <SectionTitle eyebrow="Доставка" title="Как мы работаем" />
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-5">
+          {steps.map((s, i) => (
+            <div key={s.n} className="bg-card border border-border rounded-2xl p-6 animate-fade-up" style={{ animationDelay: `${i * 70}ms` }}>
+              <div className="font-mono text-xs text-fresh-olive mb-3">{s.n}</div>
+              <div className="font-heading text-xl mb-2 leading-tight">{s.title}</div>
+              <div className="text-sm text-muted-foreground leading-relaxed">{s.desc}</div>
             </div>
-            <div className="p-5">
-              <h3 className="font-heading text-xl mb-1">{t.title}</h3>
-              <p className="text-muted-foreground text-xs mb-4">{t.desc}</p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => onUse(t.prompt)}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-foreground text-background text-xs font-medium hover:opacity-90 transition"
-                >
-                  <Icon name="Wand2" size={12} />
-                  Использовать шаблон
-                </button>
-                <button className="px-3 py-2 rounded-lg border border-border text-xs hover:bg-secondary transition" title="Предпросмотр">
-                  <Icon name="Eye" size={12} />
-                </button>
-              </div>
+          ))}
+        </div>
+
+        <div className="mt-12 bg-fresh-olive text-fresh-cream rounded-3xl p-8 md:p-12 grid md:grid-cols-[1.3fr_1fr] gap-8 items-center">
+          <div>
+            <div className="text-xs uppercase tracking-widest opacity-70 mb-2">Зона доставки</div>
+            <h3 className="font-heading text-3xl md:text-4xl mb-3">Весь город и пригород в радиусе 25 км</h3>
+            <p className="text-fresh-cream/80 max-w-md leading-relaxed">
+              Принимаем заказы с 8:00 до 21:00. Самовывоз — бесплатно в любое время работы магазина.
+            </p>
+          </div>
+          <div className="flex flex-col gap-3">
+            <a href="tel:+74950000000" className="flex items-center justify-between px-5 py-4 rounded-2xl bg-fresh-cream text-fresh-ink hover:bg-white transition">
+              <span className="flex items-center gap-3">
+                <Icon name="Phone" size={18} />
+                <span className="font-medium">+7 (495) 000-00-00</span>
+              </span>
+              <Icon name="ArrowUpRight" size={16} />
+            </a>
+            <a href="https://wa.me/74950000000" className="flex items-center justify-between px-5 py-4 rounded-2xl bg-fresh-cream/15 hover:bg-fresh-cream/25 transition border border-fresh-cream/20">
+              <span className="flex items-center gap-3">
+                <Icon name="MessageCircle" size={18} />
+                <span className="font-medium">Написать в WhatsApp</span>
+              </span>
+              <Icon name="ArrowUpRight" size={16} />
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ─── Contacts ───────────────────────────────────────────────────────────────
+function Contacts() {
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [text, setText] = useState("");
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name || !phone) return toast.error("Заполните имя и телефон");
+    toast.success("Заявка отправлена! Перезвоним в течение 15 минут");
+    setName(""); setPhone(""); setText("");
+  }
+
+  return (
+    <section id="contacts" className="bg-fresh-beige/40 border-t border-border py-16 md:py-24">
+      <div className="max-w-6xl mx-auto px-5 md:px-8 grid lg:grid-cols-[1fr_1.1fr] gap-10 lg:gap-16">
+        <div>
+          <SectionTitle eyebrow="Контакты" title="Заходите или позвоните" align="left" />
+
+          <div className="space-y-5">
+            <ContactRow icon="MapPin" title="Адрес" lines={["г. Москва, ул. Зелёная, 12", "первый этаж со двора"]} />
+            <ContactRow icon="Phone" title="Телефон" lines={["+7 (495) 000-00-00", "ежедневно 8:00–22:00"]} />
+            <ContactRow icon="Mail" title="Почта" lines={["hello@fresh-shop.ru"]} />
+            <ContactRow icon="Instagram" title="Соцсети" lines={["@fresh_shop"]} />
+          </div>
+
+          <div className="mt-8 rounded-2xl overflow-hidden border border-border aspect-[16/9] bg-fresh-beige/60 flex items-center justify-center">
+            <div className="text-center">
+              <Icon name="Map" size={36} className="text-fresh-olive mx-auto mb-2" />
+              <div className="text-sm text-muted-foreground">здесь будет карта</div>
             </div>
           </div>
+        </div>
+
+        <form onSubmit={submit} className="bg-card rounded-3xl border border-border p-7 md:p-9">
+          <div className="font-heading text-3xl mb-2">Оставьте заявку</div>
+          <p className="text-sm text-muted-foreground mb-6">Перезвоним в течение 15 минут и поможем собрать заказ</p>
+
+          <div className="space-y-4">
+            <Input label="Как к вам обращаться" value={name} onChange={setName} placeholder="Ваше имя" />
+            <Input label="Телефон" value={phone} onChange={setPhone} placeholder="+7 (___) ___-__-__" type="tel" />
+            <Field label="Комментарий">
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={4}
+                placeholder="Что нужно собрать?"
+                className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm focus:border-fresh-olive focus:outline-none resize-none"
+              />
+            </Field>
+          </div>
+
+          <button
+            type="submit"
+            className="w-full mt-6 py-3.5 rounded-full bg-fresh-olive text-fresh-cream font-medium hover:bg-fresh-ink transition flex items-center justify-center gap-2"
+          >
+            <Icon name="Send" size={16} />
+            Отправить заявку
+          </button>
+          <p className="text-[11px] text-muted-foreground text-center mt-4 leading-relaxed">
+            Нажимая кнопку, вы соглашаетесь с обработкой персональных данных
+          </p>
+        </form>
+      </div>
+    </section>
+  );
+}
+
+function ContactRow({ icon, title, lines }: { icon: string; title: string; lines: string[] }) {
+  return (
+    <div className="flex items-start gap-4">
+      <div className="w-11 h-11 rounded-full bg-card border border-border flex-shrink-0 flex items-center justify-center">
+        <Icon name={icon} fallback="Circle" size={16} className="text-fresh-olive" />
+      </div>
+      <div>
+        <div className="text-xs uppercase tracking-widest text-muted-foreground mb-1">{title}</div>
+        {lines.map((l, i) => (
+          <div key={i} className={i === 0 ? "font-medium" : "text-sm text-muted-foreground"}>{l}</div>
         ))}
       </div>
     </div>
   );
 }
 
-// ─── Shared mini-components ───────────────────────────────────────────────────
-function Card({ title, children, accent = "purple", badge }: {
-  title: string;
-  children: React.ReactNode;
-  accent?: "purple" | "orange";
-  badge?: string;
+function Input({ label, value, onChange, placeholder, type = "text" }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string;
 }) {
   return (
-    <div className="bg-card border border-border rounded-2xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <span className={`w-1 h-4 rounded-full ${accent === "purple" ? "bg-purple-500" : "bg-orange-500"}`} />
-          <h3 className="font-heading uppercase tracking-wider text-sm">{title}</h3>
-        </div>
-        {badge && (
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400 border border-orange-500/20 font-mono uppercase">
-            {badge}
-          </span>
-        )}
-      </div>
-      {children}
-    </div>
+    <Field label={label}>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm focus:border-fresh-olive focus:outline-none"
+      />
+    </Field>
   );
 }
 
-function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <div className="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mb-1.5">{label}</div>
+      <div className="text-xs uppercase tracking-widest text-muted-foreground mb-1.5">{label}</div>
       {children}
-      {hint && <div className="text-[11px] text-muted-foreground mt-1">{hint}</div>}
     </label>
   );
 }
 
-function Input({ placeholder, type = "text", mono, value, onChange }: {
-  placeholder?: string;
-  type?: string;
-  mono?: boolean;
-  value?: string;
-  onChange?: (v: string) => void;
-}) {
+// ─── Footer ─────────────────────────────────────────────────────────────────
+function Footer() {
   return (
-    <input
-      type={type}
-      placeholder={placeholder}
-      value={value ?? ""}
-      onChange={(e) => onChange?.(e.target.value)}
-      className={`w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm placeholder:text-muted-foreground/60 focus:border-purple-500/50 focus:outline-none transition ${mono ? "font-mono" : ""}`}
-    />
+    <footer className="bg-fresh-ink text-fresh-cream py-12">
+      <div className="max-w-6xl mx-auto px-5 md:px-8">
+        <div className="grid md:grid-cols-[1.3fr_1fr_1fr] gap-8 mb-10">
+          <div>
+            <div className="flex items-center gap-2.5 mb-4">
+              <div className="w-10 h-10 rounded-full bg-fresh-cream text-fresh-olive flex items-center justify-center">
+                <Icon name="Leaf" size={18} />
+              </div>
+              <div className="font-heading text-2xl">Фрэшь</div>
+            </div>
+            <p className="text-sm text-fresh-cream/60 leading-relaxed max-w-sm">
+              Маленький фермерский магазин с большим вкусом. С 2019 года кормим город свежим.
+            </p>
+          </div>
+
+          <div>
+            <div className="text-xs uppercase tracking-widest text-fresh-cream/60 mb-3">Меню</div>
+            <ul className="space-y-1.5 text-sm">
+              <li><a href="#categories" className="hover:text-white transition">Ассортимент</a></li>
+              <li><a href="#about" className="hover:text-white transition">О нас</a></li>
+              <li><a href="#delivery" className="hover:text-white transition">Доставка</a></li>
+              <li><a href="#contacts" className="hover:text-white transition">Контакты</a></li>
+            </ul>
+          </div>
+
+          <div>
+            <div className="text-xs uppercase tracking-widest text-fresh-cream/60 mb-3">Связаться</div>
+            <ul className="space-y-1.5 text-sm">
+              <li><a href="tel:+74950000000" className="hover:text-white transition">+7 (495) 000-00-00</a></li>
+              <li><a href="mailto:hello@fresh-shop.ru" className="hover:text-white transition">hello@fresh-shop.ru</a></li>
+              <li className="text-fresh-cream/60">ул. Зелёная, 12</li>
+            </ul>
+          </div>
+        </div>
+
+        <div className="pt-6 border-t border-fresh-cream/10 flex flex-col md:flex-row justify-between items-start md:items-center gap-3 text-xs text-fresh-cream/50">
+          <div>© 2025 «Фрэшь». Все права защищены</div>
+          <div className="flex gap-4">
+            <a href="#" className="hover:text-white transition">Политика конфиденциальности</a>
+            <a href="#" className="hover:text-white transition">Договор оферты</a>
+          </div>
+        </div>
+      </div>
+    </footer>
   );
 }
 
-function Toggle({ label, hint, on, setOn, color }: {
-  label: string;
-  hint?: string;
-  on: boolean;
-  setOn: (v: boolean) => void;
-  color: "purple" | "orange";
-}) {
+// ─── Section Title ──────────────────────────────────────────────────────────
+function SectionTitle({ eyebrow, title, align = "center" }: { eyebrow: string; title: string; align?: "left" | "center" }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-2">
-      <div>
-        <div className="font-medium text-sm">{label}</div>
-        {hint && <div className="text-xs text-muted-foreground">{hint}</div>}
+    <div className={`mb-10 md:mb-14 ${align === "center" ? "text-center" : ""}`}>
+      <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.25em] text-fresh-olive mb-3">
+        <span className="w-6 h-px bg-fresh-olive" />
+        {eyebrow}
+        <span className="w-6 h-px bg-fresh-olive" />
       </div>
-      <button
-        onClick={() => setOn(!on)}
-        className={`relative w-11 h-6 rounded-full transition-colors ${
-          on ? (color === "purple" ? "bg-purple-500" : "bg-orange-500") : "bg-secondary border border-border"
-        }`}
-      >
-        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-background transition-all ${on ? "left-[22px]" : "left-0.5"}`} />
-      </button>
+      <h2 className="font-heading text-4xl md:text-5xl text-fresh-ink leading-tight whitespace-pre-line">
+        {title}
+      </h2>
     </div>
   );
 }
