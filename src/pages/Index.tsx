@@ -9,9 +9,14 @@ import { AntTyping } from "@/components/AntTyping";
 import { BackgroundAnt } from "@/components/BackgroundAnt";
 import { detectIntent, generateImage, generateVideo, generateAudio, fileToBase64 } from "@/lib/media";
 import { pingSupabase, applySql } from "@/lib/supabase";
+import { AuthGate } from "@/components/AuthGate";
+import {
+  useAuth, signOut, addModerator, removeModerator, transferOwnership,
+  setTokensFor, banUser, deleteUser, checkContent, logAudit, clearAudit, consumeToken, syncTopBalance,
+} from "@/lib/auth";
 
 type Tab = "chat" | "core" | "projects";
-type CoreTab = "ai" | "github" | "payments" | "system";
+type CoreTab = "ai" | "github" | "payments" | "system" | "logs" | "users";
 type Device = "desktop" | "mobile";
 type Msg = {
   role: "user" | "ai";
@@ -54,8 +59,24 @@ const TEMPLATES = [
 ];
 
 export default function Index() {
+  return (
+    <AuthGate>
+      <IndexInner />
+    </AuthGate>
+  );
+}
+
+function IndexInner() {
   const [tab, setTab] = useState<Tab>("chat");
   const [presetPrompt, setPresetPrompt] = useState("");
+  const { isModerator } = useAuth();
+
+  useEffect(() => { syncTopBalance(); }, []);
+
+  // Если не модератор/админ — насильно прячем «Мозг»
+  useEffect(() => {
+    if (tab === "core" && !isModerator) setTab("chat");
+  }, [isModerator, tab]);
 
   return (
     <div className="min-h-screen bg-background text-foreground grid-bg relative">
@@ -64,7 +85,7 @@ export default function Index() {
         <TopBar />
         <main className="pb-24">
           {tab === "chat" && <ChatTab presetPrompt={presetPrompt} clearPreset={() => setPresetPrompt("")} />}
-          {tab === "core" && <CoreTab />}
+          {tab === "core" && isModerator && <CoreTab />}
           {tab === "projects" && (
             <ProjectsTab onUse={(p) => { setPresetPrompt(p); setTab("chat"); }} />
           )}
@@ -78,6 +99,12 @@ export default function Index() {
 // ─── Top Bar ──────────────────────────────────────────────────────────────────
 function TopBar() {
   const [s] = useSettings();
+  const { session } = useAuth();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const initials = session?.email ? session.email.slice(0, 2).toUpperCase() : "??";
+  const roleColor = session?.role === "superadmin" ? "text-orange-400" : session?.role === "moderator" ? "text-purple-400" : "text-muted-foreground";
+  const roleLabel = session?.role === "superadmin" ? "OWNER" : session?.role === "moderator" ? "MOD" : "USER";
+
   return (
     <header className="sticky top-0 z-40 backdrop-blur-xl bg-background/70 border-b border-border">
       <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
@@ -98,16 +125,38 @@ function TopBar() {
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary border border-border">
             <Icon name="Coins" size={12} className="text-orange-500" />
-            <span className="font-mono font-medium">{s.tokens.toLocaleString("ru-RU")}</span>
+            <span className="font-mono font-medium">{(session?.tokens ?? s.tokens).toLocaleString("ru-RU")}</span>
             <span className="text-muted-foreground">токенов</span>
           </div>
-          <button className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-xs font-bold text-black">
-            AK
-          </button>
+          <div className="relative">
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              className="flex items-center gap-2 pl-1 pr-3 py-1 rounded-full bg-secondary border border-border hover:border-purple-500/50 transition"
+            >
+              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-[10px] font-bold text-black">
+                {initials}
+              </div>
+              <span className={`font-mono text-[10px] uppercase tracking-wider ${roleColor}`}>{roleLabel}</span>
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 top-12 w-64 bg-card border border-border rounded-xl shadow-2xl p-2 z-50 animate-fade-up">
+                <div className="px-3 py-2 border-b border-border mb-1">
+                  <div className="font-mono text-xs truncate">{session?.email}</div>
+                  <div className={`text-[10px] font-mono uppercase tracking-wider mt-0.5 ${roleColor}`}>{roleLabel}</div>
+                </div>
+                <button
+                  onClick={() => { signOut(); setMenuOpen(false); toast.success("Вы вышли"); }}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm hover:bg-secondary transition text-left"
+                >
+                  <Icon name="LogOut" size={14} /> Выйти
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
-        <button className="md:hidden w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-xs font-bold text-black">
-          AK
+        <button onClick={() => setMenuOpen((v) => !v)} className="md:hidden w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-xs font-bold text-black">
+          {initials}
         </button>
       </div>
     </header>
@@ -116,9 +165,10 @@ function TopBar() {
 
 // ─── Bottom Nav ───────────────────────────────────────────────────────────────
 function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
+  const { isModerator } = useAuth();
   const items: { id: Tab; label: string; icon: string }[] = [
     { id: "chat", label: "Чат", icon: "MessageSquare" },
-    { id: "core", label: "Мозг", icon: "Brain" },
+    ...(isModerator ? [{ id: "core" as Tab, label: "Мозг", icon: "Brain" }] : []),
     { id: "projects", label: "Проекты", icon: "LayoutGrid" },
   ];
 
@@ -157,6 +207,7 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
   const [files, setFilesState] = useState<ProjectFiles>(() => loadFiles());
   const [attached, setAttached] = useState<{ name: string; data: string } | null>(null);
   const photoRef = useRef<HTMLInputElement>(null);
+  const auth = useAuth();
 
   useEffect(() => {
     const idx = findIndexHtml(files);
@@ -200,6 +251,20 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     const text = input.trim();
     if ((!text && !attached) || busy) return;
 
+    // Content filter
+    const check = checkContent(text);
+    const sessEmail = auth.session?.email || "anonymous";
+    const sessRole = auth.session?.role || "user";
+
+    if (!check.ok) {
+      setMessages((m) => [...m, { role: "user", text }]);
+      setMessages((m) => [...m, { role: "ai", text: "[Система] Запрос отклонён политикой безопасности", actions: ["🚫 Контент-фильтр", check.reason || "Стоп-слово"] }]);
+      logAudit({ email: sessEmail, role: sessRole, intent: "blocked", text, blocked: true, reason: check.reason });
+      setInput("");
+      setAttached(null);
+      return;
+    }
+
     const userMsg: Msg = { role: "user", text: text || "(без текста)", image: attached?.data };
     setMessages((m) => [...m, userMsg]);
     setInput("");
@@ -208,6 +273,8 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     setBusy(true);
 
     const intent = detectIntent(text, !!currentAttached);
+    logAudit({ email: sessEmail, role: sessRole, intent: intent || "web", text });
+    consumeToken();
 
     // ── МЕДИА-ВЕТКА ─────────────────────────────────────────────
     if (intent === "image" || intent === "image-edit") {
@@ -568,14 +635,17 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
 
 // ─── Core Tab ─────────────────────────────────────────────────────────────────
 function CoreTab() {
-  const [sub, setSub] = useState<CoreTab>("ai");
+  const { isOwner } = useAuth();
+  const [sub, setSub] = useState<CoreTab>(isOwner ? "ai" : "logs");
 
-  const subTabs: { id: CoreTab; label: string; icon: string }[] = [
-    { id: "ai", label: "Движок", icon: "Brain" },
+  const subTabs: { id: CoreTab; label: string; icon: string; owner?: boolean }[] = [
+    { id: "ai", label: "Движок", icon: "Brain", owner: true },
     { id: "github", label: "GitHub", icon: "Github" },
-    { id: "payments", label: "Платежи", icon: "CreditCard" },
-    { id: "system", label: "Система", icon: "Settings" },
-  ];
+    { id: "payments", label: "Платежи", icon: "CreditCard", owner: true },
+    { id: "system", label: "Система", icon: "Settings", owner: true },
+    { id: "logs", label: "Логи", icon: "ScrollText" },
+    { id: "users", label: "Пользователи", icon: "Users", owner: true },
+  ].filter((t) => !t.owner || isOwner);
 
   return (
     <div className="max-w-5xl mx-auto px-4 md:px-6 pt-6 animate-fade-up">
@@ -600,10 +670,12 @@ function CoreTab() {
         ))}
       </div>
 
-      {sub === "ai" && <AIPanel />}
+      {sub === "ai" && isOwner && <AIPanel />}
       {sub === "github" && <GitHubPanel />}
-      {sub === "payments" && <PaymentsPanel />}
-      {sub === "system" && <SystemPanel />}
+      {sub === "payments" && isOwner && <PaymentsPanel />}
+      {sub === "system" && isOwner && <SystemPanel />}
+      {sub === "logs" && <LogsPanel />}
+      {sub === "users" && isOwner && <UsersPanel />}
     </div>
   );
 }
@@ -1037,6 +1109,8 @@ function SystemPanel() {
         </div>
       </Card>
 
+      <AccessControlCard />
+
       <Card title="Переключатели" accent="purple">
         <div className="space-y-3">
           <Toggle
@@ -1066,6 +1140,207 @@ function SystemPanel() {
             onClick={() => { set((c) => ({ ...c, tokens: 0 })); toast.success("Баланс обнулён"); }}
             className="px-4 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-medium hover:bg-red-500/20 transition"
           >Сбросить</button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Access Control / Owners / Moderators ────────────────────────────────────
+function AccessControlCard() {
+  const { ownerEmail, moderators } = useAuth();
+  const [newMod, setNewMod] = useState("");
+  const [newOwner, setNewOwner] = useState("");
+  const envOwner = (import.meta.env.VITE_ADMIN_EMAIL || import.meta.env.NEXT_PUBLIC_ADMIN_EMAIL || "") as string;
+
+  return (
+    <Card title="Доступ и роли" accent="orange" badge="Owner-only">
+      <div className="grid md:grid-cols-2 gap-5">
+        <div>
+          <div className="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mb-2">Владелец (Superadmin)</div>
+          <div className="flex items-center gap-2 p-3 rounded-lg bg-orange-500/5 border border-orange-500/20">
+            <Icon name="Crown" size={14} className="text-orange-400" />
+            <span className="font-mono text-sm truncate flex-1">{ownerEmail || "не задан"}</span>
+          </div>
+          <div className="text-[10px] font-mono text-muted-foreground mt-2 leading-relaxed">
+            {envOwner
+              ? <>Источник: ENV <code className="text-purple-400">VITE_ADMIN_EMAIL</code></>
+              : <>Первый зарегистрированный аккаунт. Можно задать через ENV <code className="text-purple-400">VITE_ADMIN_EMAIL</code> в Vercel.</>}
+          </div>
+
+          <div className="mt-4">
+            <div className="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mb-2">Передать права владельца</div>
+            <div className="flex gap-2">
+              <input
+                value={newOwner}
+                onChange={(e) => setNewOwner(e.target.value)}
+                placeholder="email нового владельца"
+                className="flex-1 bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:border-orange-500/50 focus:outline-none"
+              />
+              <button
+                onClick={() => {
+                  if (!confirm("Передать права владельца? Текущий аккаунт станет обычным пользователем.")) return;
+                  try { transferOwnership(newOwner); setNewOwner(""); toast.success("Права переданы"); }
+                  catch (e: unknown) { toast.error(e instanceof Error ? e.message : "Ошибка"); }
+                }}
+                className="px-3 py-2 rounded-lg bg-orange-500/10 border border-orange-500/30 text-orange-400 text-xs font-medium hover:bg-orange-500/20 transition"
+              >
+                Передать
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mb-2">Список администраторов (Moderator)</div>
+          <div className="space-y-1.5 mb-3 max-h-44 overflow-y-auto scrollbar-thin">
+            {moderators.length === 0 && <div className="text-xs text-muted-foreground italic px-1">Пока пусто</div>}
+            {moderators.map((m) => (
+              <div key={m} className="flex items-center gap-2 p-2 rounded-lg bg-secondary border border-border">
+                <Icon name="Shield" size={12} className="text-purple-400" />
+                <span className="font-mono text-xs truncate flex-1">{m}</span>
+                <button
+                  onClick={() => { removeModerator(m); toast.success("Удалён"); }}
+                  className="w-6 h-6 rounded hover:bg-background flex items-center justify-center text-muted-foreground hover:text-red-400 transition"
+                >
+                  <Icon name="X" size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={newMod}
+              onChange={(e) => setNewMod(e.target.value)}
+              placeholder="email помощника"
+              className="flex-1 bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:border-purple-500/50 focus:outline-none"
+            />
+            <button
+              onClick={() => {
+                try { addModerator(newMod); setNewMod(""); toast.success("Добавлен"); }
+                catch (e: unknown) { toast.error(e instanceof Error ? e.message : "Ошибка"); }
+              }}
+              className="px-3 py-2 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-400 text-xs font-medium hover:bg-purple-500/20 transition"
+            >
+              Добавить
+            </button>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ─── Logs Panel ──────────────────────────────────────────────────────────────
+function LogsPanel() {
+  const { auditLog } = useAuth();
+  return (
+    <div className="space-y-4 animate-fade-up">
+      <Card title="Аудит запросов" accent="purple" badge={`${auditLog.length} записей`}>
+        <div className="flex justify-end mb-3">
+          <button
+            onClick={() => { if (confirm("Очистить все логи?")) { clearAudit(); toast.success("Логи очищены"); } }}
+            className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-secondary transition"
+          >
+            Очистить
+          </button>
+        </div>
+        <div className="space-y-1.5 max-h-[60vh] overflow-y-auto scrollbar-thin">
+          {auditLog.length === 0 && <div className="text-xs text-muted-foreground italic p-3">Лог пуст</div>}
+          {auditLog.map((e, i) => (
+            <div key={i} className={`p-2.5 rounded-lg border text-xs font-mono flex items-start gap-3 ${
+              e.blocked ? "bg-red-500/5 border-red-500/20" : "bg-secondary border-border"
+            }`}>
+              <span className="text-[10px] text-muted-foreground whitespace-nowrap mt-0.5">
+                {new Date(e.ts).toLocaleString("ru-RU")}
+              </span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase whitespace-nowrap ${
+                e.role === "superadmin" ? "bg-orange-500/10 text-orange-400" :
+                e.role === "moderator" ? "bg-purple-500/10 text-purple-400" :
+                "bg-muted text-muted-foreground"
+              }`}>{e.role}</span>
+              <span className="text-muted-foreground truncate min-w-0 flex-shrink-0 w-40">{e.email}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-background text-purple-300 whitespace-nowrap">{e.intent}</span>
+              <span className={`flex-1 truncate ${e.blocked ? "text-red-400" : "text-foreground"}`}>
+                {e.blocked ? `🚫 ${e.reason} · ` : ""}{e.text}
+              </span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Users Panel ─────────────────────────────────────────────────────────────
+function UsersPanel() {
+  const { accounts } = useAuth();
+  const list = Object.values(accounts).sort((a, b) => b.createdAt - a.createdAt);
+  const [editTokens, setEditTokens] = useState<Record<string, string>>({});
+
+  return (
+    <div className="space-y-4 animate-fade-up">
+      <Card title="Пользователи" accent="orange" badge={`${list.length}`}>
+        <div className="space-y-2 max-h-[65vh] overflow-y-auto scrollbar-thin">
+          {list.length === 0 && <div className="text-xs text-muted-foreground italic p-3">Нет аккаунтов</div>}
+          {list.map((a) => (
+            <div key={a.id} className="p-3 rounded-lg bg-secondary border border-border">
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-orange-500 flex items-center justify-center text-[10px] font-bold text-black">
+                  {a.email.slice(0, 2).toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono text-sm truncate">{a.email}</div>
+                  <div className="text-[10px] text-muted-foreground font-mono">{new Date(a.createdAt).toLocaleString("ru-RU")} · ID {a.id.slice(0, 8)}</div>
+                </div>
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full uppercase ${
+                  a.role === "superadmin" ? "bg-orange-500/10 text-orange-400 border border-orange-500/20" :
+                  a.role === "moderator" ? "bg-purple-500/10 text-purple-400 border border-purple-500/20" :
+                  "bg-muted text-muted-foreground border border-border"
+                }`}>{a.role}</span>
+                {a.banned && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20">BANNED</span>}
+              </div>
+              <div className="mt-3 flex items-center gap-2 flex-wrap">
+                <div className="flex items-center gap-1">
+                  <Icon name="Coins" size={12} className="text-orange-500" />
+                  <input
+                    type="number"
+                    value={editTokens[a.email] ?? a.tokens}
+                    onChange={(e) => setEditTokens((p) => ({ ...p, [a.email]: e.target.value }))}
+                    className="w-24 bg-background border border-border rounded px-2 py-1 text-xs font-mono"
+                  />
+                  <button
+                    onClick={() => {
+                      const v = parseInt(editTokens[a.email] ?? String(a.tokens), 10);
+                      if (Number.isFinite(v)) { setTokensFor(a.email, v); toast.success("Баланс обновлён"); }
+                    }}
+                    className="px-2 py-1 text-[10px] rounded border border-border hover:bg-background transition"
+                  >Применить</button>
+                </div>
+                <button
+                  onClick={() => { banUser(a.email, !a.banned); toast.success(a.banned ? "Разблокирован" : "Заблокирован"); }}
+                  className={`px-3 py-1 rounded text-[10px] font-mono uppercase tracking-wider transition ${
+                    a.banned
+                      ? "bg-green-500/10 text-green-400 border border-green-500/30"
+                      : "bg-red-500/10 text-red-400 border border-red-500/30"
+                  }`}
+                >
+                  {a.banned ? "Разблокировать" : "Заблокировать"}
+                </button>
+                <button
+                  onClick={() => {
+                    if (a.role === "superadmin") return toast.error("Сначала передайте права владельца");
+                    if (!confirm(`Удалить ${a.email}?`)) return;
+                    deleteUser(a.email);
+                    toast.success("Удалён");
+                  }}
+                  className="px-3 py-1 rounded text-[10px] font-mono uppercase tracking-wider bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition"
+                >
+                  Удалить
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       </Card>
     </div>
