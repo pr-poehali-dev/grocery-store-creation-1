@@ -3,7 +3,7 @@ import Icon from "@/components/ui/icon";
 import { useSettings, type Settings } from "@/lib/store";
 import { chat, extractHtml, type ChatMessage } from "@/lib/ai";
 import { importZip, exportZip, findIndexHtml, loadFiles, saveFiles, filesContextForAi, type ProjectFiles } from "@/lib/files";
-import { commitToGitHub } from "@/lib/github";
+import { commitToGitHub, pingGitHub } from "@/lib/github";
 import { toast } from "sonner";
 import { AntTyping } from "@/components/AntTyping";
 import { BackgroundAnt } from "@/components/BackgroundAnt";
@@ -551,6 +551,16 @@ function GitHubPanel() {
     }
   }
 
+  async function onCheck() {
+    try {
+      toast.loading("Проверяем токен...", { id: "ghc" });
+      const u = await pingGitHub();
+      toast.success(`Подключено: @${u.login}`, { id: "ghc" });
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Не удалось", { id: "ghc" });
+    }
+  }
+
   return (
     <div className="space-y-4 animate-fade-up">
       <Card title="Репозиторий" accent="purple">
@@ -567,8 +577,18 @@ function GitHubPanel() {
           <Field label="Ветка">
             <Input value={s.github.branch} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, branch: v } }))} placeholder="main" mono />
           </Field>
+          <Field label="CORS-прокси (необязательно)" hint="Свой прокси, проксирующий api.github.com. Пусто = прямой запрос + автофолбэк">
+            <Input value={s.github.proxy} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, proxy: v } }))} placeholder="https://corsproxy.io/?" mono />
+          </Field>
         </div>
-        <div className="mt-4 flex justify-end">
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            onClick={onCheck}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition"
+          >
+            <Icon name="Stethoscope" size={14} />
+            Проверить токен
+          </button>
           <button
             onClick={onCommit}
             disabled={busy}

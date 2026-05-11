@@ -17,6 +17,7 @@ export type Settings = {
     repo: string;
     siteUrl: string;
     branch: string;
+    proxy: string;
   };
   payments: {
     terminalKey: string;
@@ -40,7 +41,7 @@ export const DEFAULT_SETTINGS: Settings = {
     systemPrompt:
       "Ты профессиональный веб-разработчик платформы Муравей 2.0. Создаёшь современные сайты на чистом HTML/CSS/JS. ВАЖНО: отвечай ТОЛЬКО одним блоком HTML-кода (с инлайн CSS и JS внутри одного файла index.html). Никаких пояснений вне кода. Дизайн — минималистичный, в духе Linear/Vercel.",
   },
-  github: { token: "", repo: "", siteUrl: "", branch: "main" },
+  github: { token: "", repo: "", siteUrl: "", branch: "main", proxy: "" },
   payments: { terminalKey: "", password: "" },
   system: { selfEdit: false, publicAi: true },
   tokens: 12480,
