@@ -697,7 +697,7 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
                   <iframe
                     title="превью"
                     srcDoc={previewHtml}
-                    sandbox="allow-scripts allow-forms"
+                    sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox"
                     className="w-full h-full border-0 bg-white"
                   />
                   {busy && (

@@ -40,7 +40,16 @@ export function clearProject() {
   window.dispatchEvent(new Event("muravey:project-updated"));
 }
 
-const TEXT_EXT = ["html", "htm", "css", "js", "ts", "tsx", "jsx", "json", "md", "txt", "svg", "xml", "yml", "yaml", "mjs", "cjs", "vue", "py", "env", "gitignore", "lock"];
+const TEXT_EXT = new Set(["html", "htm", "css", "js", "ts", "tsx", "jsx", "json", "md", "txt", "svg", "xml", "yml", "yaml", "mjs", "cjs", "vue", "py", "env", "gitignore", "lock"]);
+
+// Бинарные ассеты, которые конвертируем в data URL (для отображения в iframe)
+const BINARY_MIME: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+  webp: "image/webp", avif: "image/avif", ico: "image/x-icon", bmp: "image/bmp",
+  woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf",
+  mp3: "audio/mpeg", ogg: "audio/ogg",
+  mp4: "video/mp4", webm: "video/webm",
+};
 
 export async function importZip(file: File): Promise<ProjectFiles> {
   const zip = await JSZip.loadAsync(file);
@@ -50,11 +59,16 @@ export async function importZip(file: File): Promise<ProjectFiles> {
     if (entry.dir) continue;
     if (entry.name.startsWith("__MACOSX")) continue;
     if (entry.name.includes("/.DS_Store")) continue;
-    // strip top-level wrapper folder if archive contains exactly one
     const path = entry.name;
     const ext = path.split(".").pop()?.toLowerCase() || "";
-    if (!TEXT_EXT.includes(ext)) continue;
-    out[path] = await entry.async("string");
+    if (TEXT_EXT.has(ext)) {
+      out[path] = await entry.async("string");
+    } else if (BINARY_MIME[ext]) {
+      // Бинарный ассет → data URL (чтобы iframe мог его показать без сетевых запросов)
+      const b64 = await entry.async("base64");
+      out[path] = `data:${BINARY_MIME[ext]};base64,${b64}`;
+    }
+    // остальные расширения пропускаем
   }
   // remove common single top-level folder prefix
   const normalized = stripCommonPrefix(out);
@@ -218,48 +232,147 @@ const CDN_INJECTOR = `
 </script>
 `.trim();
 
-// inline-bundle: собираем все локальные .js/.jsx/.tsx как blob: модули и подменяем import-пути
-function buildLocalModuleMap(files: ProjectFiles, deps: string[]): { blobMap: Record<string, string>; importMap: string } {
+// ── Inline Virtual Module System ─────────────────────────────────────────────
+// Вместо blob URL (которые не работают в srcDoc из-за нулевого origin) —
+// вшиваем ВСЕ модули как строки внутрь одного <script> через синтетическую
+// систему define/require. Babel запускается ВНУТРИ iframe после загрузки.
+function buildInlineModuleBundle(files: ProjectFiles, deps: string[], entryPath: string): string {
   const codeFiles = Object.entries(files).filter(([k]) => /\.(jsx?|tsx?|mjs)$/i.test(k));
-  // готовим placeholder URL для каждого локального файла
-  const placeholders: Record<string, string> = {};
-  for (const [path] of codeFiles) {
-    placeholders[path] = "blob:placeholder/" + path;
+
+  // Карта path → нормализованный ключ модуля
+  const normalize = (p: string) => "./" + p.replace(/^[./]+/, "");
+
+  // Строим запись модулей как строк (экранированный JSON)
+  const moduleSources: Record<string, string> = {};
+  for (const [path, src] of codeFiles) {
+    moduleSources[normalize(path)] = src;
   }
-  const blobMap: Record<string, string> = {};
-  for (const [path, raw] of codeFiles) {
-    let code = raw;
-    // транспиляция через Babel Standalone (поддержит JSX/TS)
-    try {
-       
-      const Babel = (window as unknown as { Babel?: { transform: (code: string, opts: unknown) => { code: string } } }).Babel;
-      if (Babel) {
-        code = Babel.transform(raw, { presets: ["typescript", "react"], filename: path }).code;
-      }
-    } catch {/* оставим как есть */}
-    // переписываем относительные импорты
-    code = code.replace(/from\s+["']([^"']+)["']/g, (m, src) => {
-      if (src.startsWith(".") || src.startsWith("/")) {
-        // ищем файл по относительному пути
-        const resolved = resolveImport(path, src, files);
-        if (resolved && placeholders[resolved]) return `from "${placeholders[resolved]}"`;
+
+  // Карта ассетов: все бинарные файлы уже хранятся как data URL в files[]
+  const assetMap: Record<string, string> = {};
+  for (const [path, val] of Object.entries(files)) {
+    if (val.startsWith("data:")) assetMap[normalize(path)] = val;
+  }
+
+  // import-map для CDN-зависимостей (работает для ES-модулей из внешних URL)
+  const cdnImports: Record<string, string> = {};
+  for (const d of deps) cdnImports[d] = KNOWN_DEPS[d] || `https://esm.sh/${d}`;
+  cdnImports["react"] = KNOWN_DEPS.react;
+  cdnImports["react-dom"] = KNOWN_DEPS["react-dom"];
+  cdnImports["react-dom/client"] = KNOWN_DEPS["react-dom/client"];
+
+  const importMapTag = `<script type="importmap">${JSON.stringify({ imports: cdnImports })}</script>`;
+
+  // Синтетическая система require/define — работает без fetch, без blob URL
+  const runtimeScript = `
+<script id="__muravey_vfs__">
+(function(){
+  var __modules = ${JSON.stringify(moduleSources)};
+  var __assets  = ${JSON.stringify(assetMap)};
+  var __cache   = {};
+  var __entry   = ${JSON.stringify(normalize(entryPath))};
+
+  function resolveSpec(from, spec) {
+    if (!spec.startsWith('.') && !spec.startsWith('/')) return null; // внешняя зависимость
+    var fromParts = from.split('/'); fromParts.pop();
+    var specParts = spec.split('/');
+    for (var i = 0; i < specParts.length; i++) {
+      if (specParts[i] === '..') { fromParts.pop(); }
+      else if (specParts[i] !== '.') { fromParts.push(specParts[i]); }
+    }
+    var base = fromParts.join('/');
+    var exts = ['', '.tsx', '.ts', '.jsx', '.js', '/index.tsx', '/index.ts', '/index.jsx', '/index.js'];
+    for (var e = 0; e < exts.length; e++) {
+      var candidate = base + exts[e];
+      if (!candidate.startsWith('./')) candidate = './' + candidate.replace(/^\\//, '');
+      if (__modules[candidate]) return candidate;
+      if (__assets[candidate]) return candidate;
+    }
+    return null;
+  }
+
+  function requireModule(path) {
+    if (__cache[path]) return __cache[path].exports;
+    if (__assets[path]) return { default: __assets[path] };
+    var src = __modules[path];
+    if (!src) { console.warn('[VFS] module not found:', path); return {}; }
+
+    // Babel-транспиляция внутри iframe
+    if (window.Babel) {
+      try {
+        src = window.Babel.transform(src, {
+          presets: ['typescript', 'react'],
+          plugins: [
+            ['transform-modules-commonjs', { strictMode: false }]
+          ],
+          filename: path
+        }).code;
+      } catch(e) { console.error('[VFS] Babel error in', path, e.message); }
+    }
+
+    // Подменяем относительные require() на наши
+    src = src.replace(/require\\(["']([^"']+)["']\\)/g, function(m, spec){
+      if (spec.startsWith('.') || spec.startsWith('/')) {
+        var resolved = resolveSpec(path, spec);
+        if (resolved) return 'window.__VFS_require__(' + JSON.stringify(resolved) + ')';
       }
       return m;
     });
-    const blob = new Blob([code], { type: "text/javascript" });
-    const url = URL.createObjectURL(blob);
-    blobMap[placeholders[path]] = url;
+
+    var mod = { exports: {} };
+    __cache[path] = mod;
+    try {
+      var fn = new Function('module', 'exports', 'require', src);
+      fn(mod, mod.exports, function(spec){ return requireModule(spec); });
+    } catch(e) { console.error('[VFS] runtime error in', path, e); }
+    return mod.exports;
   }
-  // import-map для известных deps
-  const imports: Record<string, string> = {};
-  for (const d of deps) imports[d] = KNOWN_DEPS[d] || `https://esm.sh/${d}`;
-  imports["react"] = KNOWN_DEPS.react;
-  imports["react-dom"] = KNOWN_DEPS["react-dom"];
-  imports["react-dom/client"] = KNOWN_DEPS["react-dom/client"];
-  // подменяем placeholders на blob: URL
-  for (const ph in blobMap) imports[ph] = blobMap[ph];
-  const importMap = `<script type="importmap">${JSON.stringify({ imports })}</script>`;
-  return { blobMap, importMap };
+
+  window.__VFS_require__ = requireModule;
+  window.__VFS_entry__   = __entry;
+})();
+</script>`;
+
+  // Bootstrap: запускается после загрузки Babel
+  const bootScript = `
+<script>
+(function boot() {
+  if (!window.Babel) { setTimeout(boot, 50); return; }
+  var m = window.__VFS_require__(window.__VFS_entry__);
+  // Если экспортирует React-компонент — маунтим в #root
+  var App = m && (m.default || m.App || m);
+  if (App && typeof App === 'function' && document.getElementById('root')) {
+    try {
+      var React = window.__VFS_require__('./node_modules/react') || {};
+      var ReactDOM;
+      try { ReactDOM = window.__VFS_require__('./node_modules/react-dom/client'); } catch(e){}
+      // Используем CDN react/react-dom уже загруженные через import-map — просто dynamic import
+      import('react').then(function(R){ import('react-dom/client').then(function(RD){
+        RD.createRoot(document.getElementById('root')).render(R.createElement(App));
+      });});
+    } catch(e) { console.error('[VFS] mount error', e); }
+  }
+})();
+</script>`;
+
+  return importMapTag + runtimeScript + bootScript;
+}
+
+// Старый API — возвращаем совместимый объект (blobMap теперь пустой — не нужен)
+function buildLocalModuleMap(files: ProjectFiles, deps: string[]): { blobMap: Record<string, string>; importMap: string } {
+  // Находим entry point
+  const entry = findFile(files, "src/main.tsx", "src/main.jsx", "main.tsx", "main.jsx", "src/index.tsx", "index.tsx", "src/App.tsx", "App.tsx");
+  if (!entry) {
+    // нет entry — только CDN import-map
+    const cdnImports: Record<string, string> = {};
+    for (const d of deps) cdnImports[d] = KNOWN_DEPS[d] || `https://esm.sh/${d}`;
+    cdnImports["react"] = KNOWN_DEPS.react;
+    cdnImports["react-dom"] = KNOWN_DEPS["react-dom"];
+    cdnImports["react-dom/client"] = KNOWN_DEPS["react-dom/client"];
+    return { blobMap: {}, importMap: `<script type="importmap">${JSON.stringify({ imports: cdnImports })}</script>` };
+  }
+  const bundle = buildInlineModuleBundle(files, deps, entry.path);
+  return { blobMap: {}, importMap: bundle };
 }
 
 function resolveImport(fromFile: string, spec: string, files: ProjectFiles): string | null {
@@ -284,30 +397,48 @@ export function buildVirtualPreview(files: ProjectFiles): string {
   const pkgFile = findFile(files, "package.json");
   const deps = pkgFile ? parsePackageDeps(pkgFile.content) : [];
 
-  // Сценарий 1: есть готовый index.html — просто инжектим CDN-логгер + import-map
-  if (indexHtml) {
-    let html = indexHtml;
-    // Коррекция абсолютных путей: /img.png → ./img.png, "/src/..." → "./src/..."
-    html = rewriteAbsolutePaths(html);
-    const cssFiles = Object.entries(files).filter(([k]) => k.endsWith(".css"));
-    let cssInline = "";
-    for (const [, css] of cssFiles) cssInline += `<style>${css}</style>\n`;
-
-    const hasReactRoot = /id=["']root["']/.test(html) || /\.(tsx|jsx)/.test(JSON.stringify(Object.keys(files)));
-    let mountScript = "";
-    if (hasReactRoot) {
-      const { importMap } = buildLocalModuleMap(files, deps);
-      // главная точка входа
-      const entry = findFile(files, "src/main.tsx", "src/main.jsx", "main.tsx", "main.jsx", "src/index.tsx", "index.tsx");
-      if (entry) {
-        const entryPh = "blob:placeholder/" + entry.path;
-        mountScript = `${importMap}\n<script type="module" src="${entryPh}"></script>`;
+  // Ассеты: подменяем все упоминания файлов ассетов на data URL прямо в HTML
+  const inlineAssetHtml = (html: string) => {
+    return html.replace(/\b(src|href|url)\s*(?:=\s*(["'])([^"']+)\2|\(([^)'"]+)\))/gi, (m, attr, q, val1, val2) => {
+      const v = (val1 || val2 || "").trim();
+      if (!v || v.startsWith("data:") || v.startsWith("http") || v.startsWith("//")) return m;
+      const norm = v.replace(/^[./]+/, "").replace(/^\//, "");
+      const found = Object.entries(files).find(([k]) => k === norm || k.endsWith("/" + norm));
+      if (found && found[1].startsWith("data:")) {
+        if (val2 !== undefined) return `${attr}(${found[1]})`;
+        return `${attr}=${q}${found[1]}${q}`;
       }
+      return m;
+    });
+  };
+
+  // CSS: встраиваем всё, кроме уже инлайнового
+  const buildCssInline = () => {
+    const cssFiles = Object.entries(files).filter(([k]) => k.endsWith(".css"));
+    return cssFiles.map(([, css]) => `<style>${inlineAssetHtml(css)}</style>`).join("\n");
+  };
+
+  // Сценарий 1: есть готовый index.html
+  if (indexHtml) {
+    let html = rewriteAbsolutePaths(indexHtml);
+    // Подставляем ассеты прямо в src/href
+    html = inlineAssetHtml(html);
+    const cssInline = buildCssInline();
+
+    const hasTs = /\.(tsx|jsx|ts)/.test(JSON.stringify(Object.keys(files)));
+    const hasReactRoot = /id=["']root["']/.test(html) || hasTs;
+
+    // Удаляем <script src="..."> которые ссылаются на локальные файлы — они будут загружены VFS
+    html = html.replace(/<script[^>]+src=["'](?!http|\/\/)([^"']+)["'][^>]*><\/script>/gi, "<!-- vfs-replaced -->");
+
+    let moduleBundle = "";
+    if (hasReactRoot || hasTs) {
+      const { importMap } = buildLocalModuleMap(files, deps);
+      moduleBundle = importMap;
     }
 
-    // <base href="./"> — чтобы относительные пути работали в srcDoc
     const baseTag = `<base href="./">`;
-    const headInject = `${baseTag}\n${CDN_INJECTOR}\n${cssInline}\n${mountScript}`;
+    const headInject = `${baseTag}\n${CDN_INJECTOR}\n${cssInline}\n${moduleBundle}`;
     if (html.includes("</head>")) html = html.replace("</head>", `${headInject}\n</head>`);
     else if (html.includes("<head>")) html = html.replace("<head>", `<head>${headInject}`);
     else html = `<!doctype html><html><head>${headInject}</head><body>${html}</body></html>`;
@@ -318,20 +449,15 @@ export function buildVirtualPreview(files: ProjectFiles): string {
   const appFile = findFile(files, "src/App.tsx", "src/App.jsx", "App.tsx", "App.jsx");
   if (appFile) {
     const { importMap } = buildLocalModuleMap(files, deps);
-    const appPh = "blob:placeholder/" + appFile.path;
+    const cssInline = buildCssInline();
     return `<!doctype html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="./">
 ${CDN_INJECTOR}
+${cssInline}
 ${importMap}
 </head><body>
 <div id="root"></div>
-<script type="module">
-  import React from 'react';
-  import { createRoot } from 'react-dom/client';
-  import App from '${appPh}';
-  createRoot(document.getElementById('root')).render(React.createElement(App));
-</script>
 </body></html>`;
   }
 
