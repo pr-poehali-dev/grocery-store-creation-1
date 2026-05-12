@@ -9,7 +9,8 @@ import {
 import { chat, extractHtml, type ChatMessage } from "@/lib/ai";
 import {
   importZip, exportZip, findIndexHtml, loadFiles, saveFiles, filesContextForAi,
-  loadMeta, saveMeta, clearProject, buildVirtualPreview, type ProjectFiles, type ProjectMeta,
+  loadMeta, saveMeta, clearProject, buildVirtualPreview, parsePackageDeps,
+  type ProjectFiles, type ProjectMeta,
 } from "@/lib/files";
 import { commitToGitHub, pingGitHub } from "@/lib/github";
 import { toast } from "sonner";
@@ -44,8 +45,15 @@ type Msg = {
   sql?: string;
 };
 
-function stripSearchCmd(text: string): string {
-  return text.replace(/(?:^|\n)\s*(?:🔎\s*)?\[?SEARCH\]?:\s*.+?(?:\n|$)/i, "\n").trim();
+function stripToolCmds(text: string): string {
+  let t = text;
+  // WRITE/EDIT блоки с кодом — целиком
+  t = t.replace(/(?:^|\n)\s*(?:💉\s*)?\[?(?:WRITE|EDIT)\]?:\s*[^\n`]+\s*\n+```(?:[a-zA-Z]+)?\n[\s\S]*?\n```/g, "\n");
+  // SEARCH-команды
+  t = t.replace(/(?:^|\n)\s*(?:🔎\s*)?\[?SEARCH\]?:\s*.+?(?:\n|$)/gi, "\n");
+  // READ-команды
+  t = t.replace(/(?:^|\n)\s*(?:📖\s*)?\[?READ\]?:\s*.+?(?:\n|$)/gi, "\n");
+  return t.trim();
 }
 
 function extractActions(text: string): { actions: string[]; rest: string } {
@@ -411,21 +419,47 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     for (const m of prior) history.push({ role: m.role === "user" ? "user" : "assistant", content: m.text });
     history.push({ role: "user", content: text });
 
+    let multiFileApplied: string[] = [];
     try {
       const reply = await chat(history, undefined, (p) => {
-        if (p.stage === "searching") {
-          setMessages((m) => {
-            const n = [...m];
-            const last = n[n.length - 1];
-            if (last?.status === "loading") {
-              last.text = `🔎 Поиск в сети · «${p.note}»...`;
-            }
-            return [...n];
-          });
-        }
+        setMessages((m) => {
+          const n = [...m];
+          const last = n[n.length - 1];
+          if (!last || last.status !== "loading") return n;
+          if (p.stage === "searching") last.text = `🔎 Поиск в сети · «${p.note}»...`;
+          else if (p.stage === "reading") last.text = `📖 Чтение файлов · ${p.paths.slice(0, 3).join(", ")}${p.paths.length > 3 ? "..." : ""}`;
+          else if (p.stage === "writing") {
+            multiFileApplied = p.paths;
+            last.text = `💉 Запись ${p.paths.length} файл(ов)...`;
+          }
+          return [...n];
+        });
+      }, {
+        files,
+        onFilesChange: (next) => {
+          setFilesState(next);
+          saveFiles(next);
+          const nextMeta: ProjectMeta = {
+            source: meta.source === "zip" ? "self-edit" : meta.source === "empty" ? "generated" : meta.source,
+            name: meta.name || "Новая генерация",
+            ts: Date.now(),
+          };
+          saveMeta(nextMeta);
+          setMeta(nextMeta);
+          rebuildPreview(next);
+        },
       });
       clearInterval(tick);
-      const cleanReply = stripSearchCmd(reply);
+
+      // Если ИИ применил WRITE-команды — это финал, выводим список
+      if (multiFileApplied.length > 0) {
+        const cleanText = stripToolCmds(reply);
+        const actsW = ["💉 Изменено файлов: " + multiFileApplied.length, "🚀 Превью обновлено"];
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: cleanText || "[Система] Файлы обновлены.", actions: actsW, progress: 100 }; return n; });
+        return;
+      }
+
+      const cleanReply = stripToolCmds(reply);
       const { actions, rest } = extractActions(cleanReply);
       const html = extractHtml(rest || cleanReply);
       if (html) {
@@ -725,19 +759,31 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
 
 // ─── Source Indicator Bar ─────────────────────────────────────────────────────
 function SourceBar({ meta, fileCount, onReset }: { meta: ProjectMeta; fileCount: number; onReset: () => void }) {
-  const map: Record<ProjectMeta["source"], { icon: string; label: string; color: string }> = {
-    zip: { icon: "FolderArchive", label: `📁 Проект: ${meta.name || "ZIP"}`, color: "text-orange-400 border-orange-500/40 bg-orange-500/5" },
-    generated: { icon: "Hammer", label: "🏗️ Проект: Новая генерация", color: "text-purple-400 border-purple-500/40 bg-purple-500/5" },
-    "self-edit": { icon: "Bot", label: "🤖 Проект: Саморедактирование Core", color: "text-green-400 border-green-500/40 bg-green-500/5" },
-    empty: { icon: "Inbox", label: "Проект пуст", color: "text-muted-foreground border-border bg-secondary/40" },
+  const map: Record<ProjectMeta["source"], { icon: string; color: string; tone: string }> = {
+    zip: { icon: "FolderArchive", color: "text-orange-400 border-orange-500/40 bg-orange-500/5", tone: "ZIP" },
+    generated: { icon: "Hammer", color: "text-purple-400 border-purple-500/40 bg-purple-500/5", tone: "Новая генерация" },
+    "self-edit": { icon: "Bot", color: "text-green-400 border-green-500/40 bg-green-500/5", tone: "Саморедактирование Core" },
+    empty: { icon: "Inbox", color: "text-muted-foreground border-border bg-secondary/40", tone: "пусто" },
   };
   const cur = map[meta.source];
+
+  // Точный формат из ТЗ: 📁 Проект: [Название] | Файлов: [N]
+  const projectName =
+    meta.source === "zip" ? `${meta.name || "ZIP"}.zip` :
+    meta.source === "generated" ? "Новая генерация" :
+    meta.source === "self-edit" ? (meta.name ? `${meta.name}.zip` : "Core") :
+    "—";
+
   return (
-    <div className={`px-4 py-2 border-b border-border flex items-center justify-between gap-2 text-xs ${cur.color}`}>
-      <div className="flex items-center gap-2 min-w-0">
-        <Icon name={cur.icon} fallback="Inbox" size={13} />
-        <span className="font-mono truncate">{cur.label}</span>
-        {fileCount > 0 && <span className="font-mono opacity-60">· {fileCount} файлов</span>}
+    <div className={`px-4 py-2.5 border-b border-border flex items-center justify-between gap-2 text-xs ${cur.color}`}>
+      <div className="flex items-center gap-3 min-w-0 font-mono">
+        <Icon name={cur.icon} fallback="Inbox" size={14} />
+        <span className="truncate">📁 Проект: <b className="font-semibold">{projectName}</b></span>
+        <span className="opacity-50">|</span>
+        <span className="whitespace-nowrap">Файлов: <b className="font-semibold">{fileCount}</b></span>
+        {meta.source !== "empty" && (
+          <span className="hidden md:inline-flex opacity-50">· режим: {cur.tone}</span>
+        )}
       </div>
       <button
         onClick={onReset}
@@ -745,7 +791,7 @@ function SourceBar({ meta, fileCount, onReset }: { meta: ProjectMeta; fileCount:
         title="Полностью очистить проект"
       >
         <Icon name="Trash2" size={11} />
-        Очистить всё
+        Сброс
       </button>
     </div>
   );
@@ -1163,6 +1209,18 @@ function GitHubPanel() {
       // мета уже сохранена внутри importZip
       toast.success(`💉 Virtual mount: ${count} файлов смонтировано. Превью обновлено.`, { id: "zip" });
       window.dispatchEvent(new Event("muravey:project-updated"));
+
+      // Авто-анализ зависимостей: ищем package.json и предлагаем поиск
+      const pkgEntry = Object.entries(files).find(([k]) => k.toLowerCase().endsWith("package.json"));
+      if (pkgEntry) {
+        const deps = parsePackageDeps(pkgEntry[1]);
+        if (deps.length > 0) {
+          const top = deps.slice(0, 5).join(", ");
+          if (getSettings().ai.search.enabled) {
+            toast.info(`📦 Найдено ${deps.length} зависимостей: ${top}${deps.length > 5 ? "..." : ""}. Муравей сможет гуглить их документацию по запросу.`, { duration: 6000 });
+          }
+        }
+      }
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Ошибка распаковки", { id: "zip" });
     } finally {

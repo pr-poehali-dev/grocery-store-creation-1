@@ -1,5 +1,6 @@
 import { getSettings, setSettings, getActiveProviderConfig } from "./store";
-import { extractSearchCommand, searchWeb, formatResultsForLlm } from "./search";
+import { extractSearchCommand, searchWeb, formatResultsForLlm, extractReadCommands, extractWriteCommands } from "./search";
+import { readFileByPath, writeFileByPath, type ProjectFiles } from "./files";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -49,25 +50,77 @@ async function callLlmOnce(history: ChatMessage[]): Promise<string> {
   return data?.choices?.[0]?.message?.content || "";
 }
 
-export type ChatProgress = { stage: "thinking" | "searching" | "writing"; note?: string };
+export type ChatProgress =
+  | { stage: "thinking" }
+  | { stage: "searching"; note: string }
+  | { stage: "reading"; paths: string[] }
+  | { stage: "writing"; paths: string[] }
+  | { stage: "done" };
+
+export type ChatOpts = {
+  files?: ProjectFiles;
+  onFilesChange?: (next: ProjectFiles) => void;
+};
+
+const MAX_HOPS = 6;
 
 export async function chat(
   history: ChatMessage[],
   onDelta?: (delta: string) => void,
   onProgress?: (p: ChatProgress) => void,
+  opts: ChatOpts = {},
 ): Promise<string> {
   const s = getSettings();
-  const maxHops = s.ai.search.enabled && s.ai.search.autoMode ? 2 : 0;
+  const searchEnabled = s.ai.search.enabled && s.ai.search.autoMode;
 
   let working: ChatMessage[] = [...history];
+  let currentFiles: ProjectFiles = opts.files ? { ...opts.files } : {};
+  const hasFiles = Object.keys(currentFiles).length > 0;
   let hop = 0;
+
    
   while (true) {
     onProgress?.({ stage: "thinking" });
     const text = await callLlmOnce(working);
 
-    const searchQ = maxHops > 0 ? extractSearchCommand(text) : null;
-    if (searchQ && hop < maxHops) {
+    // 1) WRITE: применяем сразу (даже если есть и READ) — это терминальное действие
+    const writes = hasFiles ? extractWriteCommands(text) : [];
+    if (writes.length > 0 && hop < MAX_HOPS) {
+      const applied: string[] = [];
+      for (const w of writes) {
+        currentFiles = writeFileByPath(currentFiles, w.path, w.content);
+        applied.push(w.path);
+      }
+      onProgress?.({ stage: "writing", paths: applied });
+      opts.onFilesChange?.(currentFiles);
+      // отдаём финальный ответ (с WRITE: блоками внутри — UI их вырежет)
+      if (onDelta) onDelta(text);
+      setSettings((cur) => ({ ...cur, tokens: Math.max(0, cur.tokens - 1) }));
+      return text;
+    }
+
+    // 2) READ: подгружаем содержимое файлов и продолжаем диалог
+    const reads = hasFiles ? extractReadCommands(text) : [];
+    if (reads.length > 0 && hop < MAX_HOPS) {
+      onProgress?.({ stage: "reading", paths: reads });
+      const chunks: string[] = [];
+      for (const p of reads) {
+        const f = readFileByPath(currentFiles, p);
+        if (f) chunks.push(`--- ${f.path} (${f.content.length} b) ---\n${f.content.slice(0, 8000)}`);
+        else chunks.push(`--- ${p} ---\n[файл не найден в проекте]`);
+      }
+      working = [
+        ...working,
+        { role: "assistant", content: text },
+        { role: "user", content: `[Содержимое запрошенных файлов]\n\n${chunks.join("\n\n")}\n\nПродолжай выполнение задачи. Когда готов внести правки — используй формат:\nWRITE: путь/к/файлу.ext\n\`\`\`\nновое содержимое\n\`\`\`` },
+      ];
+      hop += 1;
+      continue;
+    }
+
+    // 3) SEARCH: интернет
+    const searchQ = searchEnabled && hop < MAX_HOPS ? extractSearchCommand(text) : null;
+    if (searchQ) {
       onProgress?.({ stage: "searching", note: searchQ });
       let toolMsg = "";
       try {
@@ -79,13 +132,14 @@ export async function chat(
       working = [
         ...working,
         { role: "assistant", content: text },
-        { role: "user", content: toolMsg + "\n\nИспользуй найденную информацию, продолжай отвечать пользователю обычным форматом. Больше команд SEARCH: не вызывай." },
+        { role: "user", content: toolMsg + "\n\nИспользуй найденную информацию. Больше команд SEARCH: не вызывай." },
       ];
       hop += 1;
       continue;
     }
 
-    onProgress?.({ stage: "writing" });
+    // 4) Финал
+    onProgress?.({ stage: "done" });
     if (onDelta) onDelta(text);
     setSettings((cur) => ({ ...cur, tokens: Math.max(0, cur.tokens - 1) }));
     return text;

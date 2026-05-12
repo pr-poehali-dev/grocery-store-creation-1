@@ -116,6 +116,44 @@ export function flatTreeList(files: ProjectFiles): string {
   return keys.map((k) => `  ${k}  (${files[k].length} b)`).join("\n");
 }
 
+// On-demand чтение файла по пути с авто-нормализацией
+export function readFileByPath(files: ProjectFiles, path: string): { path: string; content: string } | null {
+  if (!path) return null;
+  const norm = path.replace(/^[./]+/, "").trim();
+  if (files[norm]) return { path: norm, content: files[norm] };
+  const keys = Object.keys(files);
+  // case-insensitive
+  const ci = keys.find((k) => k.toLowerCase() === norm.toLowerCase());
+  if (ci) return { path: ci, content: files[ci] };
+  // endsWith match
+  const ends = keys.find((k) => k.toLowerCase().endsWith("/" + norm.toLowerCase()));
+  if (ends) return { path: ends, content: files[ends] };
+  // basename match (если ИИ дал только имя файла)
+  const baseOnly = norm.split("/").pop()?.toLowerCase();
+  if (baseOnly) {
+    const byName = keys.find((k) => k.toLowerCase().endsWith("/" + baseOnly) || k.toLowerCase() === baseOnly);
+    if (byName) return { path: byName, content: files[byName] };
+  }
+  return null;
+}
+
+// Запись/обновление файла. Возвращает мутированную копию files.
+export function writeFileByPath(files: ProjectFiles, path: string, content: string): ProjectFiles {
+  const norm = path.replace(/^[./]+/, "").trim();
+  if (!norm) return files;
+  return { ...files, [norm]: content };
+}
+
+// Экспорт parser для использования снаружи
+export function parsePackageDeps(pkgJson: string): string[] {
+  try {
+    const p = JSON.parse(pkgJson);
+    return Object.keys({ ...(p.dependencies || {}), ...(p.devDependencies || {}) });
+  } catch {
+    return [];
+  }
+}
+
 export function filesContextForAi(files: ProjectFiles, maxChars = 14000): string {
   const entries = Object.entries(files);
   if (entries.length === 0) return "";
@@ -158,27 +196,6 @@ const KNOWN_DEPS: Record<string, string> = {
   clsx: "https://esm.sh/clsx@2",
   sonner: "https://esm.sh/sonner@1",
 };
-
-function parsePackageDeps(pkgJson: string): string[] {
-  try {
-    const p = JSON.parse(pkgJson);
-    return Object.keys({ ...(p.dependencies || {}), ...(p.devDependencies || {}) });
-  } catch {
-    return [];
-  }
-}
-
-function buildImportMap(deps: string[]): string {
-  const map: Record<string, string> = {};
-  for (const d of deps) if (KNOWN_DEPS[d]) map[d] = KNOWN_DEPS[d];
-  // base react/react-dom всегда нужны
-  if (!map["react"]) map["react"] = KNOWN_DEPS.react;
-  if (!map["react-dom"]) map["react-dom"] = KNOWN_DEPS["react-dom"];
-  if (!map["react-dom/client"]) map["react-dom/client"] = KNOWN_DEPS["react-dom/client"];
-  // неизвестные → esm.sh fallback
-  for (const d of deps) if (!map[d]) map[d] = `https://esm.sh/${d}`;
-  return `<script type="importmap">${JSON.stringify({ imports: map })}</script>`;
-}
 
 const CDN_INJECTOR = `
 <!-- Muravey Virtual Mount CDN -->
@@ -270,6 +287,8 @@ export function buildVirtualPreview(files: ProjectFiles): string {
   // Сценарий 1: есть готовый index.html — просто инжектим CDN-логгер + import-map
   if (indexHtml) {
     let html = indexHtml;
+    // Коррекция абсолютных путей: /img.png → ./img.png, "/src/..." → "./src/..."
+    html = rewriteAbsolutePaths(html);
     const cssFiles = Object.entries(files).filter(([k]) => k.endsWith(".css"));
     let cssInline = "";
     for (const [, css] of cssFiles) cssInline += `<style>${css}</style>\n`;
@@ -286,8 +305,11 @@ export function buildVirtualPreview(files: ProjectFiles): string {
       }
     }
 
-    const headInject = `${CDN_INJECTOR}\n${cssInline}\n${mountScript}`;
+    // <base href="./"> — чтобы относительные пути работали в srcDoc
+    const baseTag = `<base href="./">`;
+    const headInject = `${baseTag}\n${CDN_INJECTOR}\n${cssInline}\n${mountScript}`;
     if (html.includes("</head>")) html = html.replace("</head>", `${headInject}\n</head>`);
+    else if (html.includes("<head>")) html = html.replace("<head>", `<head>${headInject}`);
     else html = `<!doctype html><html><head>${headInject}</head><body>${html}</body></html>`;
     return html;
   }
@@ -299,6 +321,7 @@ export function buildVirtualPreview(files: ProjectFiles): string {
     const appPh = "blob:placeholder/" + appFile.path;
     return `<!doctype html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<base href="./">
 ${CDN_INJECTOR}
 ${importMap}
 </head><body>
@@ -314,4 +337,19 @@ ${importMap}
 
   // Сценарий 3: ничего не нашли
   return "";
+}
+
+// Заменяет абсолютные пути (/foo.png) на относительные (./foo.png) в атрибутах src/href.
+// CDN (//cdn..., http://, https://) и data:/blob:/mailto:/tel: не трогаем.
+function rewriteAbsolutePaths(html: string): string {
+  return html.replace(/\b(src|href|action|poster)\s*=\s*(["'])([^"']+)\2/gi, (m, attr, q, val) => {
+    const v = String(val).trim();
+    if (
+      v.startsWith("http://") || v.startsWith("https://") || v.startsWith("//") ||
+      v.startsWith("data:") || v.startsWith("blob:") || v.startsWith("#") ||
+      v.startsWith("mailto:") || v.startsWith("tel:") || v.startsWith("./") || v.startsWith("../")
+    ) return m;
+    if (v.startsWith("/")) return `${attr}=${q}.${v}${q}`;
+    return m;
+  });
 }

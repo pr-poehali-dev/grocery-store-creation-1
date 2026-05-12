@@ -207,3 +207,28 @@ export function extractSearchCommand(text: string): string | null {
   if (m) return m[1].trim().slice(0, 200);
   return null;
 }
+
+// READ: <path>
+export function extractReadCommands(text: string): string[] {
+  const out: string[] = [];
+  const re = /(?:^|\n)\s*(?:📖\s*)?\[?READ\]?:\s*(.+?)(?:\n|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const p = m[1].trim().replace(/[`"']/g, "").slice(0, 300);
+    if (p) out.push(p);
+  }
+  return out;
+}
+
+// WRITE: <path>\n```...content...```
+export function extractWriteCommands(text: string): Array<{ path: string; content: string }> {
+  const out: Array<{ path: string; content: string }> = [];
+  const re = /(?:^|\n)\s*(?:💉\s*)?\[?(?:WRITE|EDIT)\]?:\s*([^\n`]+)\s*\n+```(?:[a-zA-Z]+)?\n([\s\S]*?)\n```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const path = m[1].trim().replace(/[`"']/g, "");
+    const content = m[2];
+    if (path) out.push({ path, content });
+  }
+  return out;
+}
