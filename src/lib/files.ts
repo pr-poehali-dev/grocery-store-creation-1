@@ -211,11 +211,8 @@ const KNOWN_DEPS: Record<string, string> = {
   sonner: "https://esm.sh/sonner@1",
 };
 
-const CDN_INJECTOR = `
-<!-- Muravey Virtual Mount CDN -->
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/@babel/standalone@7.24.0/babel.min.js"></script>
-<script>
+// Лёгкий инжектор: только логгер ошибок. Tailwind и Babel — опционально.
+const LOGGER_INJECTOR = `<script>
   window.__MURAVEY_LOG__ = function(level, msg){
     try{ parent.postMessage({ type:'muravey:log', level: level, msg: String(msg) }, '*'); }catch(e){}
   };
@@ -229,8 +226,9 @@ const CDN_INJECTOR = `
     var l = console.log;
     console.log = function(){ window.__MURAVEY_LOG__('log', Array.from(arguments).join(' ')); l.apply(console, arguments); };
   })();
-</script>
-`.trim();
+</script>`;
+
+const TAILWIND_TAG = `<script src="https://cdn.tailwindcss.com"></script>`;
 
 // ── Inline Virtual Module System ─────────────────────────────────────────────
 // Вместо blob URL (которые не работают в srcDoc из-за нулевого origin) —
@@ -238,34 +236,29 @@ const CDN_INJECTOR = `
 // систему define/require. Babel запускается ВНУТРИ iframe после загрузки.
 function buildInlineModuleBundle(files: ProjectFiles, deps: string[], entryPath: string): string {
   const codeFiles = Object.entries(files).filter(([k]) => /\.(jsx?|tsx?|mjs)$/i.test(k));
-
-  // Карта path → нормализованный ключ модуля
   const normalize = (p: string) => "./" + p.replace(/^[./]+/, "");
 
-  // Строим запись модулей как строк (экранированный JSON)
   const moduleSources: Record<string, string> = {};
-  for (const [path, src] of codeFiles) {
-    moduleSources[normalize(path)] = src;
-  }
+  for (const [path, src] of codeFiles) moduleSources[normalize(path)] = src;
 
-  // Карта ассетов: все бинарные файлы уже хранятся как data URL в files[]
   const assetMap: Record<string, string> = {};
   for (const [path, val] of Object.entries(files)) {
     if (val.startsWith("data:")) assetMap[normalize(path)] = val;
   }
 
-  // import-map для CDN-зависимостей (работает для ES-модулей из внешних URL)
   const cdnImports: Record<string, string> = {};
   for (const d of deps) cdnImports[d] = KNOWN_DEPS[d] || `https://esm.sh/${d}`;
   cdnImports["react"] = KNOWN_DEPS.react;
   cdnImports["react-dom"] = KNOWN_DEPS["react-dom"];
   cdnImports["react-dom/client"] = KNOWN_DEPS["react-dom/client"];
 
+  // import-map должен идти ДО любых module-скриптов
   const importMapTag = `<script type="importmap">${JSON.stringify({ imports: cdnImports })}</script>`;
+  // Babel CDN — синхронная загрузка, ставим прямо перед VFS-runtime
+  const babelTag = `<script src="https://unpkg.com/@babel/standalone@7.24.0/babel.min.js"></script>`;
 
   // Синтетическая система require/define — работает без fetch, без blob URL
-  const runtimeScript = `
-<script id="__muravey_vfs__">
+  const runtimeScript = `<script>
 (function(){
   var __modules = ${JSON.stringify(moduleSources)};
   var __assets  = ${JSON.stringify(assetMap)};
@@ -273,18 +266,17 @@ function buildInlineModuleBundle(files: ProjectFiles, deps: string[], entryPath:
   var __entry   = ${JSON.stringify(normalize(entryPath))};
 
   function resolveSpec(from, spec) {
-    if (!spec.startsWith('.') && !spec.startsWith('/')) return null; // внешняя зависимость
+    if (!spec || (!spec.startsWith('.') && !spec.startsWith('/'))) return null;
     var fromParts = from.split('/'); fromParts.pop();
-    var specParts = spec.split('/');
+    var specParts = spec.replace(/^\\//, '').split('/');
     for (var i = 0; i < specParts.length; i++) {
       if (specParts[i] === '..') { fromParts.pop(); }
       else if (specParts[i] !== '.') { fromParts.push(specParts[i]); }
     }
-    var base = fromParts.join('/');
+    var base = fromParts.filter(Boolean).join('/');
     var exts = ['', '.tsx', '.ts', '.jsx', '.js', '/index.tsx', '/index.ts', '/index.jsx', '/index.js'];
     for (var e = 0; e < exts.length; e++) {
-      var candidate = base + exts[e];
-      if (!candidate.startsWith('./')) candidate = './' + candidate.replace(/^\\//, '');
+      var candidate = './' + base + exts[e];
       if (__modules[candidate]) return candidate;
       if (__assets[candidate]) return candidate;
     }
@@ -298,23 +290,19 @@ function buildInlineModuleBundle(files: ProjectFiles, deps: string[], entryPath:
     if (!src) { console.warn('[VFS] module not found:', path); return {}; }
 
     // Babel-транспиляция внутри iframe
-    if (window.Babel) {
-      try {
-        src = window.Babel.transform(src, {
-          presets: ['typescript', 'react'],
-          plugins: [
-            ['transform-modules-commonjs', { strictMode: false }]
-          ],
-          filename: path
-        }).code;
-      } catch(e) { console.error('[VFS] Babel error in', path, e.message); }
-    }
+    if (!window.Babel) { console.error('[VFS] Babel not loaded'); return {}; }
+    try {
+      src = window.Babel.transform(src, {
+        presets: ['typescript', ['react', { runtime: 'classic' }]],
+        plugins: [['transform-modules-commonjs', { strictMode: false }]],
+        filename: path
+      }).code;
+    } catch(e) { console.error('[VFS] Babel error in', path, e && e.message); return {}; }
 
-    // Подменяем относительные require() на наши
     src = src.replace(/require\\(["']([^"']+)["']\\)/g, function(m, spec){
       if (spec.startsWith('.') || spec.startsWith('/')) {
         var resolved = resolveSpec(path, spec);
-        if (resolved) return 'window.__VFS_require__(' + JSON.stringify(resolved) + ')';
+        if (resolved) return '__vfsReq(' + JSON.stringify(resolved) + ')';
       }
       return m;
     });
@@ -322,8 +310,15 @@ function buildInlineModuleBundle(files: ProjectFiles, deps: string[], entryPath:
     var mod = { exports: {} };
     __cache[path] = mod;
     try {
-      var fn = new Function('module', 'exports', 'require', src);
-      fn(mod, mod.exports, function(spec){ return requireModule(spec); });
+      var fn = new Function('module', 'exports', 'require', '__vfsReq', src);
+      fn(mod, mod.exports, function(spec){
+        if (spec.startsWith('.') || spec.startsWith('/')) {
+          var r = resolveSpec(path, spec);
+          if (r) return requireModule(r);
+        }
+        console.warn('[VFS] sync require for external module', spec);
+        return {};
+      }, requireModule);
     } catch(e) { console.error('[VFS] runtime error in', path, e); }
     return mod.exports;
   }
@@ -333,29 +328,30 @@ function buildInlineModuleBundle(files: ProjectFiles, deps: string[], entryPath:
 })();
 </script>`;
 
-  // Bootstrap: запускается после загрузки Babel
-  const bootScript = `
-<script>
-(function boot() {
-  if (!window.Babel) { setTimeout(boot, 50); return; }
-  var m = window.__VFS_require__(window.__VFS_entry__);
-  // Если экспортирует React-компонент — маунтим в #root
-  var App = m && (m.default || m.App || m);
-  if (App && typeof App === 'function' && document.getElementById('root')) {
-    try {
-      var React = window.__VFS_require__('./node_modules/react') || {};
-      var ReactDOM;
-      try { ReactDOM = window.__VFS_require__('./node_modules/react-dom/client'); } catch(e){}
-      // Используем CDN react/react-dom уже загруженные через import-map — просто dynamic import
-      import('react').then(function(R){ import('react-dom/client').then(function(RD){
-        RD.createRoot(document.getElementById('root')).render(R.createElement(App));
-      });});
-    } catch(e) { console.error('[VFS] mount error', e); }
+  const bootScript = `<script type="module">
+(async function boot() {
+  if (document.readyState === 'loading') {
+    await new Promise(function(r){ document.addEventListener('DOMContentLoaded', r); });
   }
+  var t0 = Date.now();
+  while ((!window.Babel || typeof window.__VFS_require__ !== 'function') && Date.now() - t0 < 5000) {
+    await new Promise(function(r){ setTimeout(r, 30); });
+  }
+  if (!window.Babel) { console.error('[VFS] Babel timeout'); return; }
+  if (typeof window.__VFS_require__ !== 'function') { console.error('[VFS] runtime not initialized'); return; }
+  try {
+    var m = window.__VFS_require__(window.__VFS_entry__);
+    var App = m && (m.default || m.App || m);
+    if (App && typeof App === 'function' && document.getElementById('root')) {
+      var R  = await import('react');
+      var RD = await import('react-dom/client');
+      RD.createRoot(document.getElementById('root')).render(R.createElement(App));
+    }
+  } catch(e) { console.error('[VFS] mount error', e); }
 })();
 </script>`;
 
-  return importMapTag + runtimeScript + bootScript;
+  return importMapTag + "\n" + babelTag + "\n" + runtimeScript + "\n" + bootScript;
 }
 
 // Старый API — возвращаем совместимый объект (blobMap теперь пустой — не нужен)
@@ -392,60 +388,122 @@ function resolveImport(fromFile: string, spec: string, files: ProjectFiles): str
   return null;
 }
 
+// Детектор: SPA (React/Vite/TSX) или Plain HTML
+function detectProjectMode(files: ProjectFiles): "plain" | "spa" {
+  const keys = Object.keys(files);
+  const hasPkg = keys.some((k) => k.toLowerCase().endsWith("package.json"));
+  const hasTsx = keys.some((k) => /\.(tsx|jsx)$/i.test(k));
+  const hasReactSrc = keys.some((k) => {
+    if (!/\.(tsx?|jsx?|mjs)$/i.test(k)) return false;
+    const src = files[k] || "";
+    if (src.startsWith("data:")) return false;
+    return /\b(import\s+[^;]*from\s+["']react|require\(["']react)/.test(src);
+  });
+  if (hasPkg || hasTsx || hasReactSrc) return "spa";
+  return "plain";
+}
+
 export function buildVirtualPreview(files: ProjectFiles): string {
   const indexHtml = findIndexHtml(files);
   const pkgFile = findFile(files, "package.json");
   const deps = pkgFile ? parsePackageDeps(pkgFile.content) : [];
+  const mode = detectProjectMode(files);
 
-  // Ассеты: подменяем все упоминания файлов ассетов на data URL прямо в HTML
+  // Инлайн ассетов в HTML/CSS: подмена локальных путей на data URL
+  // ВАЖНО: не трогаем http://, https://, // (CDN), data:, blob:, #, mailto:, tel:
   const inlineAssetHtml = (html: string) => {
     return html.replace(/\b(src|href|url)\s*(?:=\s*(["'])([^"']+)\2|\(([^)'"]+)\))/gi, (m, attr, q, val1, val2) => {
       const v = (val1 || val2 || "").trim();
-      if (!v || v.startsWith("data:") || v.startsWith("http") || v.startsWith("//")) return m;
-      const norm = v.replace(/^[./]+/, "").replace(/^\//, "");
+      if (
+        !v ||
+        v.startsWith("data:") || v.startsWith("blob:") ||
+        v.startsWith("http://") || v.startsWith("https://") || v.startsWith("//") ||
+        v.startsWith("#") || v.startsWith("mailto:") || v.startsWith("tel:") ||
+        v.startsWith("javascript:")
+      ) return m;
+      const norm = v.replace(/^[./]+/, "").replace(/^\//, "").split("?")[0].split("#")[0];
       const found = Object.entries(files).find(([k]) => k === norm || k.endsWith("/" + norm));
       if (found && found[1].startsWith("data:")) {
         if (val2 !== undefined) return `${attr}(${found[1]})`;
         return `${attr}=${q}${found[1]}${q}`;
       }
+      // Текстовый CSS — встраиваем как <link rel=stylesheet>? Пропускаем — link обработается отдельно
       return m;
     });
   };
 
-  // CSS: встраиваем всё, кроме уже инлайнового
-  const buildCssInline = () => {
-    const cssFiles = Object.entries(files).filter(([k]) => k.endsWith(".css"));
-    return cssFiles.map(([, css]) => `<style>${inlineAssetHtml(css)}</style>`).join("\n");
+  // Инлайн локальных <link rel=stylesheet href="style.css"> и <script src="app.js">
+  // ВАЖНО: только если файл реально лежит в проекте — иначе оставляем как есть
+  const inlineLocalAssets = (html: string) => {
+    // <link rel=stylesheet href="...">
+    html = html.replace(/<link[^>]+rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*>/gi, (m, href) => {
+      if (/^(https?:)?\/\//.test(href) || href.startsWith("data:")) return m; // не трогаем CDN
+      const norm = href.replace(/^[./]+/, "").replace(/^\//, "").split("?")[0];
+      const found = Object.entries(files).find(([k]) => k === norm || k.endsWith("/" + norm));
+      if (found && !found[1].startsWith("data:")) {
+        return `<style>${inlineAssetHtml(found[1])}</style>`;
+      }
+      return m;
+    });
+    // <script src="local.js"> — встраиваем содержимое (только если файл локальный и текстовый)
+    html = html.replace(/<script\b([^>]*)\bsrc=["']([^"']+)["']([^>]*)>\s*<\/script>/gi, (m, pre, src, post) => {
+      if (/^(https?:)?\/\//.test(src) || src.startsWith("data:")) return m; // CDN/data — НЕ ТРОГАЕМ
+      const norm = src.replace(/^[./]+/, "").replace(/^\//, "").split("?")[0];
+      const found = Object.entries(files).find(([k]) => k === norm || k.endsWith("/" + norm));
+      if (found && !found[1].startsWith("data:")) {
+        const attrs = (pre + " " + post).replace(/\bsrc=["'][^"']+["']/i, "").trim();
+        return `<script ${attrs}>\n${found[1]}\n</script>`;
+      }
+      return m;
+    });
+    return html;
   };
 
-  // Сценарий 1: есть готовый index.html
-  if (indexHtml) {
+  // ── PLAIN HTML MODE ────────────────────────────────────────────────────────
+  // Никакого VFS, никакого Babel. Только инлайн ассетов + логгер.
+  if (mode === "plain" && indexHtml) {
     let html = rewriteAbsolutePaths(indexHtml);
-    // Подставляем ассеты прямо в src/href
+    html = inlineLocalAssets(html);
     html = inlineAssetHtml(html);
-    const cssInline = buildCssInline();
-
-    const hasTs = /\.(tsx|jsx|ts)/.test(JSON.stringify(Object.keys(files)));
-    const hasReactRoot = /id=["']root["']/.test(html) || hasTs;
-
-    // Удаляем <script src="..."> которые ссылаются на локальные файлы — они будут загружены VFS
-    html = html.replace(/<script[^>]+src=["'](?!http|\/\/)([^"']+)["'][^>]*><\/script>/gi, "<!-- vfs-replaced -->");
-
-    let moduleBundle = "";
-    if (hasReactRoot || hasTs) {
-      const { importMap } = buildLocalModuleMap(files, deps);
-      moduleBundle = importMap;
-    }
-
     const baseTag = `<base href="./">`;
-    const headInject = `${baseTag}\n${CDN_INJECTOR}\n${cssInline}\n${moduleBundle}`;
+    const headInject = `${baseTag}\n${LOGGER_INJECTOR}`;
     if (html.includes("</head>")) html = html.replace("</head>", `${headInject}\n</head>`);
     else if (html.includes("<head>")) html = html.replace("<head>", `<head>${headInject}`);
     else html = `<!doctype html><html><head>${headInject}</head><body>${html}</body></html>`;
     return html;
   }
 
-  // Сценарий 2: чистый React-проект без index.html — собираем шаблон
+  // ── SPA MODE ───────────────────────────────────────────────────────────────
+  // Babel + VFS + Tailwind
+  const buildCssInline = () => {
+    const cssFiles = Object.entries(files).filter(([k]) => k.endsWith(".css"));
+    return cssFiles.map(([, css]) => `<style>${inlineAssetHtml(css)}</style>`).join("\n");
+  };
+
+  if (indexHtml) {
+    let html = rewriteAbsolutePaths(indexHtml);
+    html = inlineAssetHtml(html);
+    const cssInline = buildCssInline();
+
+    // SPA: удаляем <script src="local.{tsx,jsx,ts,js}"> — они подгрузятся VFS
+    // НО только локальные! CDN-скрипты сохраняем.
+    html = html.replace(/<script\b([^>]*)\bsrc=["']([^"']+)["']([^>]*)><\/script>/gi, (m, _pre, src) => {
+      if (/^(https?:)?\/\//.test(src) || src.startsWith("data:")) return m;
+      // только локальные tsx/jsx — удаляем
+      if (/\.(tsx?|jsx?|mjs)(\?|$)/i.test(src)) return "<!-- vfs-replaced -->";
+      return m;
+    });
+
+    const { importMap } = buildLocalModuleMap(files, deps);
+    const baseTag = `<base href="./">`;
+    const headInject = `${baseTag}\n${LOGGER_INJECTOR}\n${TAILWIND_TAG}\n${cssInline}\n${importMap}`;
+    if (html.includes("</head>")) html = html.replace("</head>", `${headInject}\n</head>`);
+    else if (html.includes("<head>")) html = html.replace("<head>", `<head>${headInject}`);
+    else html = `<!doctype html><html><head>${headInject}</head><body>${html}</body></html>`;
+    return html;
+  }
+
+  // Чистый React-проект без index.html
   const appFile = findFile(files, "src/App.tsx", "src/App.jsx", "App.tsx", "App.jsx");
   if (appFile) {
     const { importMap } = buildLocalModuleMap(files, deps);
@@ -453,7 +511,8 @@ export function buildVirtualPreview(files: ProjectFiles): string {
     return `<!doctype html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="./">
-${CDN_INJECTOR}
+${LOGGER_INJECTOR}
+${TAILWIND_TAG}
 ${cssInline}
 ${importMap}
 </head><body>
@@ -461,7 +520,6 @@ ${importMap}
 </body></html>`;
   }
 
-  // Сценарий 3: ничего не нашли
   return "";
 }
 
