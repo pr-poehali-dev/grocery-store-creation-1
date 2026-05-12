@@ -15,11 +15,14 @@ export type MediaEngine = "replicate" | "custom";
 
 export type PromptPreset = "designer" | "engineer" | "custom";
 
+const WEB_SEARCH_RULE =
+  "ПОИСК В СЕТИ: Полагайся на свои знания. ОБРАЩАЙСЯ К ПОИСКУ ТОЛЬКО когда (1) пользователь спрашивает про конкретную свежую версию библиотеки/API, (2) нужна актуальная документация, (3) надо проверить точный текст ошибки. Тогда ПЕРВОЙ строкой ответа верни ровно: 'SEARCH: <короткий запрос на английском или русском>' — НИЧЕГО больше. Система выполнит поиск через DuckDuckGo (или Yandex для РФ) и вернёт результаты тебе следующим сообщением. Не используй SEARCH для общих знаний, для простого HTML/CSS и для генерации лендингов.";
+
 export const DESIGNER_PROMPT =
-  "Ты — Муравей 2.0 в режиме «Дизайнер». Создавай ВПЕЧАТЛЯЮЩИЕ современные сайты в духе Linear / Vercel / Apple. Сначала строка из 3–5 атомарных шагов через ' · ' (например: '🎨 Палитра · 🧱 Сетка · ✨ Анимация'), затем один блок HTML с инлайн CSS/JS в index.html. Использовать Tailwind по CDN, иконки lucide, шрифты Google. Никаких внешних API кроме CDN. Минимум воды.";
+  "Ты — Муравей 2.0 в режиме «Дизайнер». Создавай ВПЕЧАТЛЯЮЩИЕ современные сайты в духе Linear / Vercel / Apple. Сначала строка из 3–5 атомарных шагов через ' · ' (например: '🎨 Палитра · 🧱 Сетка · ✨ Анимация'), затем один блок HTML с инлайн CSS/JS в index.html. Использовать Tailwind по CDN, иконки lucide, шрифты Google. Никаких внешних API кроме CDN. Минимум воды.\n\n" + WEB_SEARCH_RULE;
 
 export const ENGINEER_PROMPT =
-  "Ты — Муравей 2.0 в режиме «Инженер-хирург». Работаешь только с уже загруженным кодом. Не пиши всё с нуля — точечно меняй существующие файлы. Сначала строка-шаги через ' · ' (например: '🔍 Анализ App.tsx · 💉 Патч роутера · 🧪 Проверка'), затем один блок HTML/JSX с финальной версией ИЗМЕНЁННОГО файла. Сохраняй стиль кода, импорты и архитектуру проекта. Если файла нет — создай минимально необходимый.";
+  "Ты — Муравей 2.0 в режиме «Инженер-хирург». Работаешь только с уже загруженным кодом. Не пиши всё с нуля — точечно меняй существующие файлы. Сначала строка-шаги через ' · ' (например: '🔍 Анализ App.tsx · 💉 Патч роутера · 🧪 Проверка'), затем один блок HTML/JSX с финальной версией ИЗМЕНЁННОГО файла. Сохраняй стиль кода, импорты и архитектуру проекта. Если файла нет — создай минимально необходимый.\n\n" + WEB_SEARCH_RULE;
 
 export const DEFAULT_SYSTEM_PROMPT = DESIGNER_PROMPT;
 
@@ -45,6 +48,13 @@ export type Settings = {
       baseUrl: string;
       videoModel: string;
       audioModel: string;
+    };
+    search: {
+      enabled: boolean;
+      engine: "duckduckgo" | "yandex" | "auto";
+      yandexApiKey: string;
+      yandexFolderId: string;
+      autoMode: boolean;
     };
   };
   github: {
@@ -134,6 +144,13 @@ export const DEFAULT_SETTINGS: Settings = {
       videoModel: MEDIA_ENGINE_DEFAULTS.replicate.videoModel,
       audioModel: MEDIA_ENGINE_DEFAULTS.replicate.audioModel,
     },
+    search: {
+      enabled: true,
+      engine: "auto",
+      yandexApiKey: "",
+      yandexFolderId: "",
+      autoMode: true,
+    },
   },
   github: { token: "", repo: "", siteUrl: "", branch: "main", proxy: "" },
   payments: { terminalKey: "", password: "" },
@@ -161,6 +178,7 @@ function load(): Settings {
         },
         image: { ...DEFAULT_SETTINGS.ai.image, ...((parsed.ai && parsed.ai.image) || {}) },
         media: { ...DEFAULT_SETTINGS.ai.media, ...((parsed.ai && parsed.ai.media) || {}) },
+        search: { ...DEFAULT_SETTINGS.ai.search, ...((parsed.ai && parsed.ai.search) || {}) },
       },
       github: { ...DEFAULT_SETTINGS.github, ...(parsed.github || {}) },
       payments: { ...DEFAULT_SETTINGS.payments, ...(parsed.payments || {}) },

@@ -44,6 +44,10 @@ type Msg = {
   sql?: string;
 };
 
+function stripSearchCmd(text: string): string {
+  return text.replace(/(?:^|\n)\s*(?:🔎\s*)?\[?SEARCH\]?:\s*.+?(?:\n|$)/i, "\n").trim();
+}
+
 function extractActions(text: string): { actions: string[]; rest: string } {
   const firstLine = text.split("\n").find((l) => l.trim().length > 0) || "";
   if (firstLine.includes("·") && firstLine.length < 240) {
@@ -408,10 +412,22 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     history.push({ role: "user", content: text });
 
     try {
-      const reply = await chat(history);
+      const reply = await chat(history, undefined, (p) => {
+        if (p.stage === "searching") {
+          setMessages((m) => {
+            const n = [...m];
+            const last = n[n.length - 1];
+            if (last?.status === "loading") {
+              last.text = `🔎 Поиск в сети · «${p.note}»...`;
+            }
+            return [...n];
+          });
+        }
+      });
       clearInterval(tick);
-      const { actions, rest } = extractActions(reply);
-      const html = extractHtml(rest || reply);
+      const cleanReply = stripSearchCmd(reply);
+      const { actions, rest } = extractActions(cleanReply);
+      const html = extractHtml(rest || cleanReply);
       if (html) {
         const sb = getSettings().supabase;
         let finalHtml = sb.url && sb.anonKey ? injectSupabase(html, sb.url, sb.anonKey) : html;
@@ -435,7 +451,7 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
         const finalActions = actions.length ? actions : ["🔨 Структура собрана", "🎨 Стили применены", "🚀 Превью обновлено"];
         setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Сборка завершена.", actions: finalActions, progress: 100 }; return n; });
       } else {
-        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: reply, actions }; return n; });
+        setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: cleanReply, actions }; return n; });
       }
     } catch (e: unknown) {
       clearInterval(tick);
@@ -1031,6 +1047,65 @@ function AIPanel() {
           <Field label="Модель аудио">
             <Input value={s.ai.media.audioModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, media: { ...c.ai.media, audioModel: v } } }))} placeholder="suno/bark" mono />
           </Field>
+        </div>
+      </Card>
+
+      <Card title="Поиск в сети · 🇷🇺 без западных API" accent="orange" badge={s.ai.search.enabled ? "ВКЛ" : "ВЫКЛ"}>
+        <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
+          Муравей сам решает, когда искать: только при вопросах о свежих версиях библиотек, точном тексте ошибок или актуальной документации. Для обычной генерации сайтов поиск не используется.
+        </p>
+        <div className="grid md:grid-cols-2 gap-4">
+          <Field label="Состояние">
+            <div className="flex gap-1.5">
+              {[
+                { id: true, label: "Включён" },
+                { id: false, label: "Выключен" },
+              ].map((opt) => (
+                <button
+                  key={String(opt.id)}
+                  onClick={() => set((c) => ({ ...c, ai: { ...c.ai, search: { ...c.ai.search, enabled: opt.id } } }))}
+                  className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition ${
+                    s.ai.search.enabled === opt.id ? "bg-orange-500/10 border-orange-500/50 text-orange-300" : "bg-secondary border-border text-muted-foreground hover:text-foreground"
+                  }`}
+                >{opt.label}</button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Поисковый движок">
+            <div className="flex gap-1.5">
+              {([
+                { id: "auto", label: "Авто" },
+                { id: "duckduckgo", label: "DuckDuckGo" },
+                { id: "yandex", label: "Yandex 🇷🇺" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => set((c) => ({ ...c, ai: { ...c.ai, search: { ...c.ai.search, engine: opt.id } } }))}
+                  className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition ${
+                    s.ai.search.engine === opt.id ? "bg-orange-500/10 border-orange-500/50 text-orange-300" : "bg-secondary border-border text-muted-foreground hover:text-foreground"
+                  }`}
+                >{opt.label}</button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Yandex Folder ID" hint="Только для Yandex Search API">
+            <Input value={s.ai.search.yandexFolderId} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, search: { ...c.ai.search, yandexFolderId: v } } }))} placeholder="b1g..." mono />
+          </Field>
+          <Field label="Yandex API Key">
+            <Input value={s.ai.search.yandexApiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, search: { ...c.ai.search, yandexApiKey: v } } }))} placeholder="AQVN..." type="password" mono />
+          </Field>
+        </div>
+        <div className="mt-3 flex items-center justify-between p-3 rounded-lg bg-secondary border border-border">
+          <div>
+            <div className="text-sm font-medium">Авто-режим</div>
+            <div className="text-[11px] text-muted-foreground">Муравей сам зовёт поиск, когда не уверен в актуальности</div>
+          </div>
+          <button
+            onClick={() => set((c) => ({ ...c, ai: { ...c.ai, search: { ...c.ai.search, autoMode: !c.ai.search.autoMode } } }))}
+            className={`w-11 h-6 rounded-full transition relative ${s.ai.search.autoMode ? "bg-orange-500" : "bg-border"}`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${s.ai.search.autoMode ? "translate-x-5" : ""}`} />
+          </button>
         </div>
       </Card>
 
