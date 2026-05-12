@@ -1,23 +1,51 @@
 import { useState, useEffect, useCallback } from "react";
 
-const KEY = "muravey_settings_v1";
+const KEY = "muravey_settings_v2";
+
+export type AiProvider = "DeepSeek" | "Claude" | "OpenAI";
+
+export type ProviderConfig = {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+};
+
+export type ImageEngine = "replicate" | "openai" | "kandinsky" | "yandexart" | "custom";
+export type MediaEngine = "replicate" | "custom";
+
+export type PromptPreset = "designer" | "engineer" | "custom";
+
+export const DESIGNER_PROMPT =
+  "Ты — Муравей 2.0 в режиме «Дизайнер». Создавай ВПЕЧАТЛЯЮЩИЕ современные сайты в духе Linear / Vercel / Apple. Сначала строка из 3–5 атомарных шагов через ' · ' (например: '🎨 Палитра · 🧱 Сетка · ✨ Анимация'), затем один блок HTML с инлайн CSS/JS в index.html. Использовать Tailwind по CDN, иконки lucide, шрифты Google. Никаких внешних API кроме CDN. Минимум воды.";
+
+export const ENGINEER_PROMPT =
+  "Ты — Муравей 2.0 в режиме «Инженер-хирург». Работаешь только с уже загруженным кодом. Не пиши всё с нуля — точечно меняй существующие файлы. Сначала строка-шаги через ' · ' (например: '🔍 Анализ App.tsx · 💉 Патч роутера · 🧪 Проверка'), затем один блок HTML/JSX с финальной версией ИЗМЕНЁННОГО файла. Сохраняй стиль кода, импорты и архитектуру проекта. Если файла нет — создай минимально необходимый.";
+
+export const DEFAULT_SYSTEM_PROMPT = DESIGNER_PROMPT;
 
 export type Settings = {
   ai: {
-    provider: "DeepSeek" | "Claude" | "OpenAI";
-    model: string;
-    apiKey: string;
-    baseUrl: string;
-    proxyUrl: string;
+    activeProvider: AiProvider;
+    providers: Record<AiProvider, ProviderConfig>;
     temperature: string;
     systemPrompt: string;
-    imageApiKey: string;
-    imageBaseUrl: string;
-    imageModel: string;
-    mediaApiKey: string;
-    mediaBaseUrl: string;
-    videoModel: string;
-    audioModel: string;
+    promptPreset: PromptPreset;
+    customPrompt: string;
+
+    image: {
+      engine: ImageEngine;
+      apiKey: string;
+      baseUrl: string;
+      model: string;
+      folderId: string;
+    };
+    media: {
+      engine: MediaEngine;
+      apiKey: string;
+      baseUrl: string;
+      videoModel: string;
+      audioModel: string;
+    };
   };
   github: {
     token: string;
@@ -43,23 +71,69 @@ export type Settings = {
   tokens: number;
 };
 
-export const DEFAULT_SETTINGS: Settings = {
-  ai: {
-    provider: "DeepSeek",
-    model: "deepseek-chat",
+export const PROVIDER_DEFAULTS: Record<AiProvider, ProviderConfig> = {
+  DeepSeek: {
     apiKey: "",
     baseUrl: "https://api.deepseek.com/v1",
-    proxyUrl: "",
+    model: "deepseek-chat",
+  },
+  Claude: {
+    apiKey: "",
+    baseUrl: "https://api.anthropic.com/v1",
+    model: "claude-sonnet-4-5",
+  },
+  OpenAI: {
+    apiKey: "",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+  },
+};
+
+export const MODELS_BY_PROVIDER: Record<AiProvider, string[]> = {
+  DeepSeek: ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"],
+  Claude: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"],
+  OpenAI: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+};
+
+export const IMAGE_ENGINE_DEFAULTS: Record<ImageEngine, { baseUrl: string; model: string; label: string }> = {
+  replicate: { baseUrl: "https://api.replicate.com/v1", model: "black-forest-labs/flux-schnell", label: "Replicate (FLUX/SD)" },
+  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-image-1", label: "OpenAI (DALL·E)" },
+  kandinsky: { baseUrl: "https://api-key.fusionbrain.ai/key/api/v1", model: "Kandinsky-3.1", label: "Kandinsky 🇷🇺" },
+  yandexart: { baseUrl: "https://llm.api.cloud.yandex.net/foundationModels/v1", model: "yandex-art/latest", label: "YandexART 🇷🇺" },
+  custom: { baseUrl: "", model: "", label: "Свой шлюз" },
+};
+
+export const MEDIA_ENGINE_DEFAULTS: Record<MediaEngine, { baseUrl: string; videoModel: string; audioModel: string; label: string }> = {
+  replicate: { baseUrl: "https://api.replicate.com/v1", videoModel: "luma/ray-flash-2", audioModel: "suno/bark", label: "Replicate" },
+  custom: { baseUrl: "", videoModel: "", audioModel: "", label: "Свой шлюз" },
+};
+
+export const DEFAULT_SETTINGS: Settings = {
+  ai: {
+    activeProvider: "DeepSeek",
+    providers: {
+      DeepSeek: { ...PROVIDER_DEFAULTS.DeepSeek },
+      Claude: { ...PROVIDER_DEFAULTS.Claude },
+      OpenAI: { ...PROVIDER_DEFAULTS.OpenAI },
+    },
     temperature: "0.7",
-    systemPrompt:
-      "Ты — IDE-агент Муравей 2.0. РЕЖИМ: технический, без приветствий и преамбулы. Формат ответа: сначала строка с атомарными шагами через ' · ' (например: '🔨 Создание схемы БД · 🎨 Tailwind тема · 🚀 Деплой'), затем один блок HTML-кода (с инлайн CSS и JS в index.html). Если пользователь упоминает БД/авторизацию — встрой @supabase/supabase-js через CDN и используй SUPABASE_URL и SUPABASE_ANON_KEY как переменные. Минимализм в духе Linear/Vercel. Никакой воды.",
-    imageApiKey: "",
-    imageBaseUrl: "https://api.replicate.com/v1",
-    imageModel: "black-forest-labs/flux-schnell",
-    mediaApiKey: "",
-    mediaBaseUrl: "https://api.replicate.com/v1",
-    videoModel: "luma/ray-flash-2",
-    audioModel: "suno/bark",
+    systemPrompt: DESIGNER_PROMPT,
+    promptPreset: "designer",
+    customPrompt: "",
+    image: {
+      engine: "replicate",
+      apiKey: "",
+      baseUrl: IMAGE_ENGINE_DEFAULTS.replicate.baseUrl,
+      model: IMAGE_ENGINE_DEFAULTS.replicate.model,
+      folderId: "",
+    },
+    media: {
+      engine: "replicate",
+      apiKey: "",
+      baseUrl: MEDIA_ENGINE_DEFAULTS.replicate.baseUrl,
+      videoModel: MEDIA_ENGINE_DEFAULTS.replicate.videoModel,
+      audioModel: MEDIA_ENGINE_DEFAULTS.replicate.audioModel,
+    },
   },
   github: { token: "", repo: "", siteUrl: "", branch: "main", proxy: "" },
   payments: { terminalKey: "", password: "" },
@@ -77,7 +151,17 @@ function load(): Settings {
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
-      ai: { ...DEFAULT_SETTINGS.ai, ...(parsed.ai || {}) },
+      ai: {
+        ...DEFAULT_SETTINGS.ai,
+        ...(parsed.ai || {}),
+        providers: {
+          DeepSeek: { ...DEFAULT_SETTINGS.ai.providers.DeepSeek, ...((parsed.ai && parsed.ai.providers && parsed.ai.providers.DeepSeek) || {}) },
+          Claude: { ...DEFAULT_SETTINGS.ai.providers.Claude, ...((parsed.ai && parsed.ai.providers && parsed.ai.providers.Claude) || {}) },
+          OpenAI: { ...DEFAULT_SETTINGS.ai.providers.OpenAI, ...((parsed.ai && parsed.ai.providers && parsed.ai.providers.OpenAI) || {}) },
+        },
+        image: { ...DEFAULT_SETTINGS.ai.image, ...((parsed.ai && parsed.ai.image) || {}) },
+        media: { ...DEFAULT_SETTINGS.ai.media, ...((parsed.ai && parsed.ai.media) || {}) },
+      },
       github: { ...DEFAULT_SETTINGS.github, ...(parsed.github || {}) },
       payments: { ...DEFAULT_SETTINGS.payments, ...(parsed.payments || {}) },
       system: { ...DEFAULT_SETTINGS.system, ...(parsed.system || {}) },
@@ -101,6 +185,11 @@ export function setSettings(patch: Partial<Settings> | ((s: Settings) => Setting
   state = next;
   localStorage.setItem(KEY, JSON.stringify(state));
   listeners.forEach((l) => l());
+}
+
+export function getActiveProviderConfig(s: Settings = state): ProviderConfig & { provider: AiProvider } {
+  const p = s.ai.activeProvider;
+  return { provider: p, ...s.ai.providers[p] };
 }
 
 export function useSettings() {

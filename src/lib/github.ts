@@ -7,11 +7,20 @@ const PROXY_FALLBACKS = [
   (u: string) => `https://cors.eu.org/${u}`,
 ];
 
+function applyCustomProxy(proxy: string, target: string): string {
+  const p = proxy.trim();
+  // Шаблон с {url} — заменим
+  if (p.includes("{url}")) return p.replace("{url}", encodeURIComponent(target));
+  // Шаблон вида corsproxy.io/?... → дописываем urlencoded
+  if (p.endsWith("?") || p.endsWith("=") || p.endsWith("&")) return `${p}${encodeURIComponent(target)}`;
+  // По умолчанию — конкатенация со слэшем
+  return `${p.replace(/\/+$/, "")}/${target}`;
+}
+
 function buildUrl(path: string, customProxy?: string): { url: string; mode: "direct" | "proxy"; tryNext?: (i: number) => string | null } {
   const base = `https://api.github.com${path}`;
   if (customProxy && customProxy.trim()) {
-    const p = customProxy.trim().replace(/\/+$/, "");
-    return { url: `${p}/${base}`, mode: "proxy" };
+    return { url: applyCustomProxy(customProxy, base), mode: "proxy" };
   }
   return {
     url: base,
@@ -59,7 +68,7 @@ async function gh<T = unknown>(path: string, token: string, init?: RequestInit):
       if (!isNetwork) throw err;
     }
   }
-  throw new Error(`Сеть/CORS: не удалось достучаться до GitHub. ${lastErr?.message || ""}. Укажите свой прокси в настройках.`);
+  throw new Error(`Сеть/CORS: не удалось достучаться до GitHub. ${lastErr?.message || ""}. Укажите свой CORS-прокси в «Мозг → GitHub → CORS-прокси» (форматы: https://my-proxy.ru/?, https://my-proxy.ru/{url}).`);
 }
 
 function utf8ToBase64(str: string): string {

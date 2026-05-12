@@ -1,4 +1,4 @@
-import { getSettings, setSettings } from "./store";
+import { getSettings, setSettings, getActiveProviderConfig } from "./store";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -15,10 +15,15 @@ export async function chat(
   onDelta?: (delta: string) => void
 ): Promise<string> {
   const s = getSettings();
-  const { provider, apiKey, baseUrl, model, temperature, proxyUrl, systemPrompt } = s.ai;
+  const cfg = getActiveProviderConfig(s);
+  const { provider, apiKey, baseUrl, model } = cfg;
+  const { temperature, systemPrompt } = s.ai;
 
   if (!apiKey) {
-    throw new Error("Не задан API-ключ. Откройте вкладку «Мозг → Движок» и введите ключ.");
+    throw new Error(`Не задан API-ключ для ${provider}. Откройте «Мозг → ИИ» и введите ключ.`);
+  }
+  if (!baseUrl) {
+    throw new Error(`Не задан Base URL для ${provider}. Откройте «Мозг → ИИ».`);
   }
 
   const messages: ChatMessage[] = [
@@ -26,8 +31,7 @@ export async function chat(
     ...history,
   ];
 
-  const base = (proxyUrl || baseUrl).replace(/\/+$/, "");
-
+  const base = baseUrl.replace(/\/+$/, "");
   const isAnthropic = provider === "Claude";
   const url = isAnthropic ? `${base}/messages` : `${base}/chat/completions`;
 
@@ -55,15 +59,11 @@ export async function chat(
         stream: false,
       };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    throw new Error(`Ошибка ${res.status}: ${errText.slice(0, 200) || res.statusText}`);
+    throw new Error(`Ошибка ${provider} ${res.status}: ${errText.slice(0, 200) || res.statusText}`);
   }
 
   const data = await res.json();

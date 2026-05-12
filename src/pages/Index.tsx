@@ -1,8 +1,16 @@
 import { useState, useRef, useEffect } from "react";
 import Icon from "@/components/ui/icon";
-import { useSettings, getSettings, type Settings } from "@/lib/store";
+import {
+  useSettings, getSettings, type AiProvider,
+  MODELS_BY_PROVIDER, PROVIDER_DEFAULTS,
+  IMAGE_ENGINE_DEFAULTS, MEDIA_ENGINE_DEFAULTS,
+  DESIGNER_PROMPT, ENGINEER_PROMPT, type PromptPreset,
+} from "@/lib/store";
 import { chat, extractHtml, type ChatMessage } from "@/lib/ai";
-import { importZip, exportZip, findIndexHtml, loadFiles, saveFiles, filesContextForAi, type ProjectFiles } from "@/lib/files";
+import {
+  importZip, exportZip, findIndexHtml, loadFiles, saveFiles, filesContextForAi,
+  loadMeta, saveMeta, clearProject, buildVirtualPreview, type ProjectFiles, type ProjectMeta,
+} from "@/lib/files";
 import { commitToGitHub, pingGitHub } from "@/lib/github";
 import { toast } from "sonner";
 import { AntTyping } from "@/components/AntTyping";
@@ -218,14 +226,33 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
   const [previewHtml, setPreviewHtml] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [files, setFilesState] = useState<ProjectFiles>(() => loadFiles());
+  const [meta, setMeta] = useState<ProjectMeta>(() => loadMeta());
   const [attached, setAttached] = useState<{ name: string; data: string } | null>(null);
+  const [consoleOpen, setConsoleOpen] = useState(true);
+  const [logs, setLogs] = useState<{ level: string; msg: string; ts: number }[]>([]);
   const photoRef = useRef<HTMLInputElement>(null);
   const auth = useAuth();
 
+  function rebuildPreview(nextFiles: ProjectFiles) {
+    if (Object.keys(nextFiles).length === 0) { setPreviewHtml(""); return; }
+    const built = buildVirtualPreview(nextFiles) || findIndexHtml(nextFiles) || "";
+    setPreviewHtml(built);
+  }
+
   useEffect(() => {
-    const idx = findIndexHtml(files);
-    if (idx) setPreviewHtml(idx);
+    rebuildPreview(files);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    function onMsg(ev: MessageEvent) {
+      const d = ev.data;
+      if (d && typeof d === "object" && d.type === "muravey:log") {
+        setLogs((prev) => [...prev.slice(-199), { level: d.level || "log", msg: String(d.msg || ""), ts: Date.now() }]);
+      }
+    }
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
   }, []);
 
   useEffect(() => {
@@ -238,13 +265,25 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
   useEffect(() => {
     const fn = () => {
       const f = loadFiles();
+      const m = loadMeta();
       setFilesState(f);
-      const idx = findIndexHtml(f);
-      if (idx) setPreviewHtml(idx);
+      setMeta(m);
+      rebuildPreview(f);
     };
     window.addEventListener("muravey:project-updated", fn);
     return () => window.removeEventListener("muravey:project-updated", fn);
   }, []);
+
+  function onResetAll() {
+    if (!confirm("Полностью стереть текущий проект и превью?")) return;
+    clearProject();
+    setFilesState({});
+    setMeta({ source: "empty", name: "", ts: 0 });
+    setPreviewHtml("");
+    setLogs([]);
+    setMessages([{ role: "ai", text: "[Система] Проект очищен. Готов к новой задаче.", actions: ["🧹 Память очищена", "🧠 Контекст пуст"] }]);
+    toast.success("Проект очищен");
+  }
 
   async function onPickPhoto(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -352,7 +391,11 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
     }
 
     // ── ВЕБ-ВЕТКА (HTML-сайт + опц. Supabase) ───────────────────
-    setMessages((m) => [...m, { role: "ai", text: "[Система] Генерация структуры проекта...", status: "loading", progress: 6 }]);
+    const hasZip = loadMeta().source === "zip";
+    const initStatus = hasZip
+      ? "🔍 Анализ структуры проекта · 💉 Подготовка инъекции в App.tsx..."
+      : "🏗️ Сборка структуры · 🎨 Применение тем...";
+    setMessages((m) => [...m, { role: "ai", text: initStatus, status: "loading", progress: 6 }]);
     const tick = setInterval(() => {
       setMessages((m) => { const n = [...m]; const last = n[n.length - 1]; if (last?.status === "loading") last.progress = Math.min(94, (last.progress || 6) + 6); return [...n]; });
     }, 500);
@@ -378,10 +421,17 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
             ? finalHtml.replace("</body>", `${leadScript}\n</body>`)
             : finalHtml + leadScript;
         }
-        setPreviewHtml(finalHtml);
         const nextFiles = { ...files, "index.html": finalHtml };
         setFilesState(nextFiles);
         saveFiles(nextFiles);
+        const nextMeta: ProjectMeta = {
+          source: meta.source === "zip" ? "self-edit" : "generated",
+          name: meta.source === "zip" ? meta.name : "Новая генерация",
+          ts: Date.now(),
+        };
+        saveMeta(nextMeta);
+        setMeta(nextMeta);
+        rebuildPreview(nextFiles);
         const finalActions = actions.length ? actions : ["🔨 Структура собрана", "🎨 Стили применены", "🚀 Превью обновлено"];
         setMessages((m) => { const n = [...m]; n[n.length - 1] = { role: "ai", text: "[Система] Сборка завершена.", actions: finalActions, progress: 100 }; return n; });
       } else {
@@ -552,6 +602,8 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
 
         {/* PREVIEW RIGHT */}
         <div className="bg-card border border-border rounded-2xl flex flex-col overflow-hidden">
+          {/* Source Indicator Bar */}
+          <SourceBar meta={meta} fileCount={Object.keys(files).length} onReset={onResetAll} />
           <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <div className="flex gap-1.5">
@@ -646,8 +698,92 @@ function ChatTab({ presetPrompt, clearPreset }: { presetPrompt: string; clearPre
               )}
             </div>
           </div>
+
+          {/* Console (errors / logs from iframe) */}
+          <ConsolePanel logs={logs} open={consoleOpen} onToggle={() => setConsoleOpen(!consoleOpen)} onClear={() => setLogs([])} />
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Source Indicator Bar ─────────────────────────────────────────────────────
+function SourceBar({ meta, fileCount, onReset }: { meta: ProjectMeta; fileCount: number; onReset: () => void }) {
+  const map: Record<ProjectMeta["source"], { icon: string; label: string; color: string }> = {
+    zip: { icon: "FolderArchive", label: `📁 Проект: ${meta.name || "ZIP"}`, color: "text-orange-400 border-orange-500/40 bg-orange-500/5" },
+    generated: { icon: "Hammer", label: "🏗️ Проект: Новая генерация", color: "text-purple-400 border-purple-500/40 bg-purple-500/5" },
+    "self-edit": { icon: "Bot", label: "🤖 Проект: Саморедактирование Core", color: "text-green-400 border-green-500/40 bg-green-500/5" },
+    empty: { icon: "Inbox", label: "Проект пуст", color: "text-muted-foreground border-border bg-secondary/40" },
+  };
+  const cur = map[meta.source];
+  return (
+    <div className={`px-4 py-2 border-b border-border flex items-center justify-between gap-2 text-xs ${cur.color}`}>
+      <div className="flex items-center gap-2 min-w-0">
+        <Icon name={cur.icon} fallback="Inbox" size={13} />
+        <span className="font-mono truncate">{cur.label}</span>
+        {fileCount > 0 && <span className="font-mono opacity-60">· {fileCount} файлов</span>}
+      </div>
+      <button
+        onClick={onReset}
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition font-medium"
+        title="Полностью очистить проект"
+      >
+        <Icon name="Trash2" size={11} />
+        Очистить всё
+      </button>
+    </div>
+  );
+}
+
+// ─── Console Panel ────────────────────────────────────────────────────────────
+function ConsolePanel({
+  logs, open, onToggle, onClear,
+}: { logs: { level: string; msg: string; ts: number }[]; open: boolean; onToggle: () => void; onClear: () => void }) {
+  const errs = logs.filter((l) => l.level === "error").length;
+  const warns = logs.filter((l) => l.level === "warn").length;
+  return (
+    <div className="border-t border-border bg-background/50">
+      <button
+        onClick={onToggle}
+        className="w-full px-4 py-2 flex items-center justify-between text-xs font-mono hover:bg-secondary/40 transition"
+      >
+        <div className="flex items-center gap-3">
+          <Icon name={open ? "ChevronDown" : "ChevronRight"} size={12} />
+          <span className="font-medium">Console</span>
+          {errs > 0 && <span className="text-red-400">● {errs} err</span>}
+          {warns > 0 && <span className="text-yellow-400">● {warns} warn</span>}
+          {errs === 0 && warns === 0 && <span className="text-green-500/70">● ok</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            onClick={(e) => { e.stopPropagation(); onClear(); }}
+            className="px-2 py-0.5 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
+          >
+            очистить
+          </span>
+          <span className="text-muted-foreground">{logs.length}</span>
+        </div>
+      </button>
+      {open && (
+        <div className="max-h-40 overflow-y-auto scrollbar-thin px-4 py-2 font-mono text-[11px] space-y-0.5">
+          {logs.length === 0 ? (
+            <div className="text-muted-foreground italic">Логи появятся здесь при ошибках в превью...</div>
+          ) : (
+            logs.map((l, i) => (
+              <div
+                key={i}
+                className={
+                  l.level === "error" ? "text-red-400" :
+                  l.level === "warn" ? "text-yellow-400" :
+                  "text-muted-foreground"
+                }
+              >
+                <span className="opacity-50">[{new Date(l.ts).toLocaleTimeString()}]</span> {l.msg}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -709,28 +845,48 @@ function CoreTab() {
 
 function AIPanel() {
   const [s, set] = useSettings();
-  const providers: Settings["ai"]["provider"][] = ["DeepSeek", "Claude", "OpenAI"];
-  const modelsByProvider: Record<Settings["ai"]["provider"], string[]> = {
-    DeepSeek: ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"],
-    Claude: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"],
-    OpenAI: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-  };
-  const baseByProvider: Record<Settings["ai"]["provider"], string> = {
-    DeepSeek: "https://api.deepseek.com/v1",
-    Claude: "https://api.anthropic.com/v1",
-    OpenAI: "https://api.openai.com/v1",
-  };
+  const providers: AiProvider[] = ["DeepSeek", "Claude", "OpenAI"];
 
-  function pickProvider(p: Settings["ai"]["provider"]) {
-    set((cur) => ({
-      ...cur,
-      ai: { ...cur.ai, provider: p, model: modelsByProvider[p][0], baseUrl: baseByProvider[p] },
+  function setProviderField(p: AiProvider, key: "apiKey" | "baseUrl" | "model", value: string) {
+    set((c) => ({
+      ...c,
+      ai: { ...c.ai, providers: { ...c.ai.providers, [p]: { ...c.ai.providers[p], [key]: value } } },
     }));
+  }
+
+  function pickActive(p: AiProvider) {
+    set((c) => ({ ...c, ai: { ...c.ai, activeProvider: p } }));
+  }
+
+  function resetProvider(p: AiProvider) {
+    set((c) => ({
+      ...c,
+      ai: { ...c.ai, providers: { ...c.ai.providers, [p]: { ...PROVIDER_DEFAULTS[p], apiKey: c.ai.providers[p].apiKey } } },
+    }));
+    toast.success(`${p}: Base URL и модель сброшены`);
+  }
+
+  function pickPreset(preset: PromptPreset) {
+    const map = { designer: DESIGNER_PROMPT, engineer: ENGINEER_PROMPT, custom: s.ai.customPrompt || s.ai.systemPrompt };
+    set((c) => ({
+      ...c,
+      ai: { ...c.ai, promptPreset: preset, systemPrompt: map[preset] },
+    }));
+  }
+
+  function pickImageEngine(eng: keyof typeof IMAGE_ENGINE_DEFAULTS) {
+    const d = IMAGE_ENGINE_DEFAULTS[eng];
+    set((c) => ({ ...c, ai: { ...c.ai, image: { ...c.ai.image, engine: eng, baseUrl: d.baseUrl, model: d.model } } }));
+  }
+
+  function pickMediaEngine(eng: keyof typeof MEDIA_ENGINE_DEFAULTS) {
+    const d = MEDIA_ENGINE_DEFAULTS[eng];
+    set((c) => ({ ...c, ai: { ...c.ai, media: { ...c.ai.media, engine: eng, baseUrl: d.baseUrl, videoModel: d.videoModel, audioModel: d.audioModel } } }));
   }
 
   async function testConnection() {
     try {
-      toast.loading("Проверяем подключение...", { id: "test" });
+      toast.loading(`Проверяем ${s.ai.activeProvider}...`, { id: "test" });
       await chat([{ role: "user", content: "Скажи коротко: «Подключение работает»." }]);
       toast.success("Подключение работает", { id: "test" });
     } catch (e: unknown) {
@@ -740,91 +896,176 @@ function AIPanel() {
 
   return (
     <div className="space-y-4 animate-fade-up">
-      <Card title="Провайдер и модель" accent="purple">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Провайдер">
-            <div className="flex gap-1.5">
-              {providers.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => pickProvider(p)}
-                  className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition ${
-                    s.ai.provider === p ? "bg-purple-500/10 border-purple-500/50 text-purple-400" : "bg-secondary border-border text-muted-foreground hover:text-foreground"
-                  }`}
-                >{p}</button>
-              ))}
+      <Card title="Активный мозг" accent="purple">
+        <div className="grid grid-cols-3 gap-2">
+          {providers.map((p) => {
+            const cfg = s.ai.providers[p];
+            const ready = !!cfg.apiKey;
+            const active = s.ai.activeProvider === p;
+            return (
+              <button
+                key={p}
+                onClick={() => pickActive(p)}
+                className={`flex flex-col items-start gap-1 px-3 py-3 rounded-xl border text-left transition ${
+                  active ? "bg-purple-500/10 border-purple-500/60 text-purple-300" : "bg-secondary border-border hover:border-purple-500/30"
+                }`}
+              >
+                <div className="flex items-center gap-2 w-full">
+                  <Icon name={p === "DeepSeek" ? "Cpu" : p === "Claude" ? "Sparkles" : "Bot"} size={14} />
+                  <span className="font-medium text-sm">{p}</span>
+                  <span className={`ml-auto w-1.5 h-1.5 rounded-full ${ready ? "bg-green-500" : "bg-red-500/60"}`} />
+                </div>
+                <div className="font-mono text-[10px] text-muted-foreground truncate w-full">{cfg.model}</div>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-xs text-muted-foreground mt-3 font-mono">↑ Активный мозг используется в чате. Ниже — индивидуальные настройки каждого.</p>
+      </Card>
+
+      {providers.map((p) => {
+        const cfg = s.ai.providers[p];
+        const isActive = s.ai.activeProvider === p;
+        return (
+          <Card
+            key={p}
+            title={`${p} · конфиг`}
+            accent={p === "Claude" ? "orange" : "purple"}
+            badge={isActive ? "АКТИВЕН" : undefined}
+          >
+            <div className="grid md:grid-cols-2 gap-4">
+              <Field label="API Key">
+                <Input value={cfg.apiKey} onChange={(v) => setProviderField(p, "apiKey", v)} placeholder={p === "OpenAI" ? "sk-..." : p === "Claude" ? "sk-ant-..." : "sk-..."} type="password" mono />
+              </Field>
+              <Field label="Base URL" hint="Адрес API или российский прокси-шлюз">
+                <Input value={cfg.baseUrl} onChange={(v) => setProviderField(p, "baseUrl", v)} placeholder={PROVIDER_DEFAULTS[p].baseUrl} mono />
+              </Field>
+              <Field label="Модель">
+                <div className="flex gap-2">
+                  <select
+                    value={cfg.model}
+                    onChange={(e) => setProviderField(p, "model", e.target.value)}
+                    className="flex-1 bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:border-purple-500/50 focus:outline-none"
+                  >
+                    {MODELS_BY_PROVIDER[p].map((m) => <option key={m} value={m}>{m}</option>)}
+                    {!MODELS_BY_PROVIDER[p].includes(cfg.model) && <option value={cfg.model}>{cfg.model} (кастом)</option>}
+                  </select>
+                </div>
+              </Field>
+              <div className="flex items-end">
+                <button onClick={() => resetProvider(p)} className="text-xs text-muted-foreground hover:text-foreground underline">
+                  Сбросить URL и модель к дефолту
+                </button>
+              </div>
             </div>
+          </Card>
+        );
+      })}
+
+      <Card title="Температура" accent="orange">
+        <Field label="Креативность" hint="0 — точно, 1 — творчески">
+          <Input value={s.ai.temperature} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, temperature: v } }))} placeholder="0.7" mono />
+        </Field>
+      </Card>
+
+      <Card title="Image API · Фото" accent="purple" badge="🇷🇺 поддерживается">
+        <Field label="Движок">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-1.5">
+            {(Object.keys(IMAGE_ENGINE_DEFAULTS) as Array<keyof typeof IMAGE_ENGINE_DEFAULTS>).map((eng) => (
+              <button
+                key={eng}
+                onClick={() => pickImageEngine(eng)}
+                className={`px-2 py-2 rounded-lg text-[11px] font-medium border transition ${
+                  s.ai.image.engine === eng ? "bg-purple-500/10 border-purple-500/50 text-purple-300" : "bg-secondary border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {IMAGE_ENGINE_DEFAULTS[eng].label}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <div className="grid md:grid-cols-2 gap-4 mt-4">
+          <Field label="API Key">
+            <Input value={s.ai.image.apiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, image: { ...c.ai.image, apiKey: v } } }))} placeholder={s.ai.image.engine === "kandinsky" ? "X-Key:X-Secret" : "ключ"} type="password" mono />
+          </Field>
+          <Field label="Endpoint URL">
+            <Input value={s.ai.image.baseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, image: { ...c.ai.image, baseUrl: v } } }))} placeholder="https://..." mono />
           </Field>
           <Field label="Модель">
-            <select
-              value={s.ai.model}
-              onChange={(e) => set((c) => ({ ...c, ai: { ...c.ai, model: e.target.value } }))}
-              className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:border-purple-500/50 focus:outline-none"
-            >
-              {modelsByProvider[s.ai.provider].map((m) => <option key={m}>{m}</option>)}
-            </select>
+            <Input value={s.ai.image.model} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, image: { ...c.ai.image, model: v } } }))} placeholder={IMAGE_ENGINE_DEFAULTS[s.ai.image.engine].model} mono />
           </Field>
+          {s.ai.image.engine === "yandexart" && (
+            <Field label="Yandex Folder ID">
+              <Input value={s.ai.image.folderId} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, image: { ...c.ai.image, folderId: v } } }))} placeholder="b1g..." mono />
+            </Field>
+          )}
         </div>
       </Card>
 
-      <Card title="Доступы к API" accent="orange">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="API-ключ">
-            <Input value={s.ai.apiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, apiKey: v } }))} placeholder="sk-..." type="password" mono />
+      <Card title="Video / Audio API" accent="orange" badge="Suno / Luma">
+        <Field label="Движок">
+          <div className="flex gap-1.5">
+            {(Object.keys(MEDIA_ENGINE_DEFAULTS) as Array<keyof typeof MEDIA_ENGINE_DEFAULTS>).map((eng) => (
+              <button
+                key={eng}
+                onClick={() => pickMediaEngine(eng)}
+                className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition ${
+                  s.ai.media.engine === eng ? "bg-orange-500/10 border-orange-500/50 text-orange-300" : "bg-secondary border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {MEDIA_ENGINE_DEFAULTS[eng].label}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <div className="grid md:grid-cols-2 gap-4 mt-4">
+          <Field label="API Key">
+            <Input value={s.ai.media.apiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, media: { ...c.ai.media, apiKey: v } } }))} placeholder="ключ" type="password" mono />
           </Field>
-          <Field label="Базовый URL">
-            <Input value={s.ai.baseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, baseUrl: v } }))} placeholder="https://api.deepseek.com/v1" mono />
-          </Field>
-          <Field label="Прокси URL" hint="Если задан — используется вместо базового">
-            <Input value={s.ai.proxyUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, proxyUrl: v } }))} placeholder="https://proxy.muravey.app" mono />
-          </Field>
-          <Field label="Температура">
-            <Input value={s.ai.temperature} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, temperature: v } }))} placeholder="0.7" mono />
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="Image API · Генерация фото" accent="purple" badge="Flux / SD / DALL·E">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Image API Key">
-            <Input value={s.ai.imageApiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageApiKey: v } }))} placeholder="r8_..." type="password" mono />
-          </Field>
-          <Field label="Базовый URL" hint="Replicate / OpenAI / свой шлюз">
-            <Input value={s.ai.imageBaseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageBaseUrl: v } }))} placeholder="https://api.replicate.com/v1" mono />
-          </Field>
-          <Field label="Модель">
-            <Input value={s.ai.imageModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, imageModel: v } }))} placeholder="black-forest-labs/flux-schnell" mono />
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="Video / Audio API · Музыка и видео" accent="orange" badge="Suno / Luma / Runway">
-        <div className="grid md:grid-cols-2 gap-4">
-          <Field label="Video/Audio API Key">
-            <Input value={s.ai.mediaApiKey} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, mediaApiKey: v } }))} placeholder="r8_..." type="password" mono />
-          </Field>
-          <Field label="Базовый URL">
-            <Input value={s.ai.mediaBaseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, mediaBaseUrl: v } }))} placeholder="https://api.replicate.com/v1" mono />
+          <Field label="Endpoint URL">
+            <Input value={s.ai.media.baseUrl} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, media: { ...c.ai.media, baseUrl: v } } }))} placeholder="https://..." mono />
           </Field>
           <Field label="Модель видео">
-            <Input value={s.ai.videoModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, videoModel: v } }))} placeholder="luma/ray-flash-2" mono />
+            <Input value={s.ai.media.videoModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, media: { ...c.ai.media, videoModel: v } } }))} placeholder="luma/ray-flash-2" mono />
           </Field>
           <Field label="Модель аудио">
-            <Input value={s.ai.audioModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, audioModel: v } }))} placeholder="suno/bark" mono />
+            <Input value={s.ai.media.audioModel} onChange={(v) => set((c) => ({ ...c, ai: { ...c.ai, media: { ...c.ai.media, audioModel: v } } }))} placeholder="suno/bark" mono />
           </Field>
         </div>
       </Card>
 
-      <Card title="Системный промпт" accent="purple">
+      <Card title="Мастер-промпт · поведение ИИ" accent="purple" badge={s.ai.promptPreset.toUpperCase()}>
+        <div className="flex gap-1.5 mb-3">
+          {([
+            { id: "designer", label: "🎨 Дизайнер", desc: "Красивые сайты с нуля" },
+            { id: "engineer", label: "🔧 Инженер-хирург", desc: "Точечные правки кода" },
+            { id: "custom", label: "✍ Свой", desc: "Полностью кастомный" },
+          ] as { id: PromptPreset; label: string; desc: string }[]).map((p) => (
+            <button
+              key={p.id}
+              onClick={() => pickPreset(p.id)}
+              title={p.desc}
+              className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition ${
+                s.ai.promptPreset === p.id ? "bg-purple-500/10 border-purple-500/50 text-purple-300" : "bg-secondary border-border text-muted-foreground hover:text-foreground"
+              }`}
+            >{p.label}</button>
+          ))}
+        </div>
         <textarea
-          rows={8}
+          rows={12}
           value={s.ai.systemPrompt}
-          onChange={(e) => set((c) => ({ ...c, ai: { ...c.ai, systemPrompt: e.target.value } }))}
-          className="w-full bg-secondary border border-border rounded-lg px-4 py-3 text-sm font-mono leading-relaxed focus:border-purple-500/50 focus:outline-none resize-none"
+          onChange={(e) => set((c) => ({
+            ...c,
+            ai: { ...c.ai, systemPrompt: e.target.value, customPrompt: c.ai.promptPreset === "custom" ? e.target.value : c.ai.customPrompt },
+          }))}
+          className="w-full bg-secondary border border-border rounded-lg px-4 py-3 text-sm font-mono leading-relaxed focus:border-purple-500/50 focus:outline-none resize-y"
         />
+        <p className="text-[11px] text-muted-foreground mt-2 font-mono">
+          {s.ai.systemPrompt.length} символов · переключатели сверху меняют ВЕСЬ текст инструкции
+        </p>
       </Card>
 
-      <div className="flex justify-end gap-2">
+      <div className="flex justify-end gap-2 sticky bottom-2 bg-background/80 backdrop-blur py-2 -mx-2 px-2 rounded-xl">
         <button onClick={testConnection} className="px-4 py-2 rounded-lg border border-border text-sm hover:bg-secondary transition">Проверить подключение</button>
         <button onClick={() => toast.success("Настройки сохранены")} className="px-5 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-orange-500 text-black text-sm font-bold hover:opacity-90 transition">Сохранить настройки</button>
       </div>
@@ -841,10 +1082,11 @@ function GitHubPanel() {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      toast.loading("Распаковываем архив...", { id: "zip" });
+      toast.loading("🔍 Анализ структуры ZIP...", { id: "zip" });
       const files = await importZip(file);
       const count = Object.keys(files).length;
-      toast.success(`Загружено файлов: ${count}. Превью обновлено.`, { id: "zip" });
+      // мета уже сохранена внутри importZip
+      toast.success(`💉 Virtual mount: ${count} файлов смонтировано. Превью обновлено.`, { id: "zip" });
       window.dispatchEvent(new Event("muravey:project-updated"));
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Ошибка распаковки", { id: "zip" });
@@ -904,8 +1146,8 @@ function GitHubPanel() {
           <Field label="Ветка">
             <Input value={s.github.branch} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, branch: v } }))} placeholder="main" mono />
           </Field>
-          <Field label="CORS-прокси (необязательно)" hint="Свой прокси, проксирующий api.github.com. Пусто = прямой запрос + автофолбэк">
-            <Input value={s.github.proxy} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, proxy: v } }))} placeholder="https://corsproxy.io/?" mono />
+          <Field label="CORS-прокси (необязательно)" hint="Шаблон с {url} или с ? в конце. Пусто = прямой + автофолбэки">
+            <Input value={s.github.proxy} onChange={(v) => set((c) => ({ ...c, github: { ...c.github, proxy: v } }))} placeholder="https://corsproxy.io/?  или  https://my-proxy.ru/{url}" mono />
           </Field>
         </div>
         <div className="mt-4 flex justify-end gap-2">

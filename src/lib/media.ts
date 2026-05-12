@@ -15,27 +15,75 @@ export function detectIntent(text: string, hasUpload: boolean): MediaIntent {
   return null;
 }
 
-function buildUrl(base: string, path: string, proxyHint?: string): string {
-  const b = (proxyHint || base).replace(/\/+$/, "");
-  return `${b}${path.startsWith("/") ? path : "/" + path}`;
-}
-
 // ─── ИЗОБРАЖЕНИЕ ──────────────────────────────────────────────────────────────
 export async function generateImage(prompt: string, init?: { image?: string }): Promise<string> {
-  const s = getSettings().ai;
-  if (!s.imageApiKey) {
-    throw new Error("Не задан Image API Key. Откройте «Мозг → Движок».");
+  const img = getSettings().ai.image;
+  if (!img.apiKey) {
+    throw new Error("Не задан Image API Key. Откройте «Мозг → ИИ → Медиа».");
+  }
+  const base = (img.baseUrl || "").replace(/\/+$/, "");
+  if (!base) throw new Error("Не задан Base URL для Image API");
+
+  // ─ Kandinsky / FusionBrain (RU) ─
+  if (img.engine === "kandinsky") {
+    const headers = {
+      "X-Key": `Key ${img.apiKey.split(":")[0] || img.apiKey}`,
+      "X-Secret": `Secret ${img.apiKey.split(":")[1] || ""}`,
+    };
+    const fd = new FormData();
+    fd.append("model_id", img.model || "4");
+    fd.append("params", new Blob([JSON.stringify({ type: "GENERATE", numImages: 1, width: 1024, height: 1024, generateParams: { query: prompt } })], { type: "application/json" }));
+    const start = await fetch(`${base}/text2image/run`, { method: "POST", headers, body: fd });
+    if (!start.ok) throw new Error(`Kandinsky ${start.status}: ${(await start.text()).slice(0, 200)}`);
+    const job = await start.json();
+    const id = job?.uuid;
+    if (!id) throw new Error("Kandinsky: пустой uuid");
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const r = await fetch(`${base}/text2image/status/${id}`, { headers });
+      const st = await r.json();
+      if (st?.status === "DONE" && st?.images?.[0]) {
+        return st.images[0].startsWith("data:") ? st.images[0] : `data:image/png;base64,${st.images[0]}`;
+      }
+      if (st?.status === "FAIL") throw new Error(`Kandinsky: ${st?.errorDescription || "сбой"}`);
+    }
+    throw new Error("Kandinsky: таймаут генерации");
   }
 
-  const base = s.imageBaseUrl.replace(/\/+$/, "");
-  const isReplicate = base.includes("replicate");
-  const isOpenAI = base.includes("openai.com");
+  // ─ YandexART ─
+  if (img.engine === "yandexart") {
+    if (!img.folderId) throw new Error("YandexART: укажите Folder ID");
+    const start = await fetch(`${base}/imageGenerationAsync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Api-Key ${img.apiKey}`, "x-folder-id": img.folderId },
+      body: JSON.stringify({
+        modelUri: `art://${img.folderId}/${img.model || "yandex-art/latest"}`,
+        messages: [{ weight: 1, text: prompt }],
+        generationOptions: { mimeType: "image/png", seed: Math.floor(Math.random() * 1e9) },
+      }),
+    });
+    if (!start.ok) throw new Error(`YandexART ${start.status}: ${(await start.text()).slice(0, 200)}`);
+    const op = await start.json();
+    const opId = op?.id;
+    if (!opId) throw new Error("YandexART: пустой operation id");
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const r = await fetch(`https://operation.api.cloud.yandex.net/operations/${opId}`, {
+        headers: { Authorization: `Api-Key ${img.apiKey}` },
+      });
+      const st = await r.json();
+      if (st?.done && st?.response?.image) return `data:image/png;base64,${st.response.image}`;
+      if (st?.error) throw new Error(`YandexART: ${st.error.message || "сбой"}`);
+    }
+    throw new Error("YandexART: таймаут");
+  }
 
-  if (isOpenAI) {
+  // ─ OpenAI ─
+  if (img.engine === "openai") {
     const res = await fetch(`${base}/images/generations`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.imageApiKey}` },
-      body: JSON.stringify({ model: s.imageModel || "gpt-image-1", prompt, size: "1024x1024", n: 1 }),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${img.apiKey}` },
+      body: JSON.stringify({ model: img.model || "gpt-image-1", prompt, size: "1024x1024", n: 1 }),
     });
     if (!res.ok) throw new Error(`Image API ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const data = await res.json();
@@ -45,16 +93,13 @@ export async function generateImage(prompt: string, init?: { image?: string }): 
     throw new Error("Пустой ответ от Image API");
   }
 
-  if (isReplicate) {
+  // ─ Replicate ─
+  if (img.engine === "replicate") {
     const create = await fetch(`${base}/predictions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${s.imageApiKey}`,
-        Prefer: "wait",
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${img.apiKey}`, Prefer: "wait" },
       body: JSON.stringify({
-        model: s.imageModel || "black-forest-labs/flux-schnell",
+        model: img.model || "black-forest-labs/flux-schnell",
         input: { prompt, ...(init?.image ? { image: init.image } : {}) },
       }),
     });
@@ -65,11 +110,11 @@ export async function generateImage(prompt: string, init?: { image?: string }): 
     throw new Error("Пустой ответ от Image API");
   }
 
-  // Универсальный шлюз
-  const res = await fetch(buildUrl(base, "/images/generate"), {
+  // ─ Custom universal endpoint ─
+  const res = await fetch(`${base}/images/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.imageApiKey}` },
-    body: JSON.stringify({ prompt, model: s.imageModel, image: init?.image }),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${img.apiKey}` },
+    body: JSON.stringify({ prompt, model: img.model, image: init?.image }),
   });
   if (!res.ok) throw new Error(`Image API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
@@ -78,17 +123,15 @@ export async function generateImage(prompt: string, init?: { image?: string }): 
 
 // ─── ВИДЕО ────────────────────────────────────────────────────────────────────
 export async function generateVideo(prompt: string): Promise<string> {
-  const s = getSettings().ai;
-  if (!s.mediaApiKey) throw new Error("Не задан Video/Audio API Key. Откройте «Мозг → Движок».");
+  const m = getSettings().ai.media;
+  if (!m.apiKey) throw new Error("Не задан Video/Audio API Key. Откройте «Мозг → ИИ → Медиа».");
+  const base = (m.baseUrl || "").replace(/\/+$/, "");
 
-  const base = s.mediaBaseUrl.replace(/\/+$/, "");
-  const isReplicate = base.includes("replicate");
-
-  if (isReplicate) {
+  if (m.engine === "replicate") {
     const res = await fetch(`${base}/predictions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.mediaApiKey}`, Prefer: "wait" },
-      body: JSON.stringify({ model: s.videoModel || "luma/ray-flash-2", input: { prompt } }),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${m.apiKey}`, Prefer: "wait" },
+      body: JSON.stringify({ model: m.videoModel || "luma/ray-flash-2", input: { prompt } }),
     });
     if (!res.ok) throw new Error(`Video API ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const data = await res.json();
@@ -97,10 +140,10 @@ export async function generateVideo(prompt: string): Promise<string> {
     throw new Error("Видео ещё рендерится — попробуйте позже");
   }
 
-  const res = await fetch(buildUrl(base, "/videos/generate"), {
+  const res = await fetch(`${base}/videos/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.mediaApiKey}` },
-    body: JSON.stringify({ prompt, model: s.videoModel }),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${m.apiKey}` },
+    body: JSON.stringify({ prompt, model: m.videoModel }),
   });
   if (!res.ok) throw new Error(`Video API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
@@ -109,17 +152,15 @@ export async function generateVideo(prompt: string): Promise<string> {
 
 // ─── АУДИО ────────────────────────────────────────────────────────────────────
 export async function generateAudio(prompt: string): Promise<string> {
-  const s = getSettings().ai;
-  if (!s.mediaApiKey) throw new Error("Не задан Video/Audio API Key. Откройте «Мозг → Движок».");
+  const m = getSettings().ai.media;
+  if (!m.apiKey) throw new Error("Не задан Video/Audio API Key. Откройте «Мозг → ИИ → Медиа».");
+  const base = (m.baseUrl || "").replace(/\/+$/, "");
 
-  const base = s.mediaBaseUrl.replace(/\/+$/, "");
-  const isReplicate = base.includes("replicate");
-
-  if (isReplicate) {
+  if (m.engine === "replicate") {
     const res = await fetch(`${base}/predictions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.mediaApiKey}`, Prefer: "wait" },
-      body: JSON.stringify({ model: s.audioModel || "suno/bark", input: { prompt } }),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${m.apiKey}`, Prefer: "wait" },
+      body: JSON.stringify({ model: m.audioModel || "suno/bark", input: { prompt } }),
     });
     if (!res.ok) throw new Error(`Audio API ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const data = await res.json();
@@ -128,10 +169,10 @@ export async function generateAudio(prompt: string): Promise<string> {
     throw new Error("Музыка ещё генерируется — попробуйте позже");
   }
 
-  const res = await fetch(buildUrl(base, "/audio/generate"), {
+  const res = await fetch(`${base}/audio/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.mediaApiKey}` },
-    body: JSON.stringify({ prompt, model: s.audioModel }),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${m.apiKey}` },
+    body: JSON.stringify({ prompt, model: m.audioModel }),
   });
   if (!res.ok) throw new Error(`Audio API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
