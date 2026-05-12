@@ -18,8 +18,8 @@ export default {
 		},
 		extend: {
 			fontFamily: {
-				heading: ['"Playfair Display"', 'serif'],
-				sans: ['Inter', 'sans-serif'],
+				heading: ['Oswald', 'sans-serif'],
+				sans: ['Roboto', 'sans-serif'],
 				mono: ['JetBrains Mono', 'monospace'],
 			},
 			colors: {
@@ -55,17 +55,6 @@ export default {
 				card: {
 					DEFAULT: 'hsl(var(--card))',
 					foreground: 'hsl(var(--card-foreground))'
-				},
-				fresh: {
-					cream: '#FAF7F0',
-					beige: '#EFE7D6',
-					sand: '#D9C9A8',
-					olive: '#6B7C3A',
-					grass: '#8AA63B',
-					leaf: '#B7C674',
-					terra: '#C97B4A',
-					berry: '#A24E3D',
-					ink: '#2B2A26',
 				},
 				purple: { 400: '#c084fc', 500: '#a855f7', 600: '#9333ea' },
 				orange: { 400: '#ff8b4d', 500: '#ff6b1a', 600: '#e85a0c' },
